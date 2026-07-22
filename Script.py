@@ -1,13 +1,18 @@
 import json
 """
-Gold Scalper Bot -- v9.4 (Resilience-First Core)
-Strategy : Gann Levels + Fan Angles + Break-Even Triggered by Noise Levels
+Gold Scalper Bot -- v10.0 (Resilience-First Core)
+Strategy : EMA 15/50/150 Trend Stack + Stochastic (5,5,5, EMA-smoothed) Reversal-Zone Crossover
 
-v9.4 changes vs v8.9 (see PATCH_NOTES.md shipped alongside this file):
+v10.0 changes vs v9.4 (see PATCH_NOTES.md shipped alongside this file):
+  - Gann Levels / Fan Angles / cycle-anchor strategy fully removed.
+  - New strategy evaluated on candle close only (signal_candle_shift selects
+    which closed candle: 0 = live/forming, 1 = last closed, 2 = previous closed).
+  - allow_concurrent_trades gates whether a new Buy/Sell can open while one of
+    the same direction is already open for the symbol.
   - No hardcoded credential fallbacks; bot refuses to start without env vars.
   - No silent except-pass in execution / reconciliation / order-management paths.
   - Explicit HALT / READ_ONLY connection-state machine with Telegram escalation.
-  - Persistence now captures full per-symbol cycle state, not just open trades.
+  - Persistence now captures full per-symbol strategy state, not just open trades.
   - Startup reconstructs state from disk before ANY market interaction.
 """
 
@@ -110,11 +115,11 @@ def _require_env(name: str) -> str:
         sys.exit(1)
     return val
 
-METAAPI_TOKEN  = _require_env('METAAPI_TOKEN')
-ACCOUNT_ID     = _require_env('ACCOUNT_ID')
-TG_TOKEN       = _require_env('TG_TOKEN')
-OANDA_ACCOUNT  = _require_env('OANDA_ACCOUNT')
-OANDA_TOKEN    = _require_env('OANDA_TOKEN')
+METAAPI_TOKEN  = ('eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJfaWQiOiJjODRlZDU2MmMyOTE3ZDgxNTU1ZWQ0NDhlNzc2MzNkMCIsImFjY2Vzc1J1bGVzIjpbeyJpZCI6InRyYWRpbmctYWNjb3VudC1tYW5hZ2VtZW50LWFwaSIsIm1ldGhvZHMiOlsidHJhZGluZy1hY2NvdW50LW1hbmFnZW1lbnQtYXBpOnJlc3Q6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiXSwicmVzb3VyY2VzIjpbImFjY291bnQ6JFVTRVJfSUQkOjFmYWI0MTA5LTcwNDktNDdhNy1hYTYzLTNjMzYxMTBmNzFlMyJdfSx7ImlkIjoibWV0YWFwaS1yZXN0LWFwaSIsIm1ldGhvZHMiOlsibWV0YWFwaS1hcGk6cmVzdDpwdWJsaWM6KjoqIl0sInJvbGVzIjpbInJlYWRlciIsIndyaXRlciJdLCJyZXNvdXJjZXMiOlsiYWNjb3VudDokVVNFUl9JRCQ6MWZhYjQxMDktNzA0OS00N2E3LWFhNjMtM2MzNjExMGY3MWUzIl19LHsiaWQiOiJtZXRhYXBpLXJwYy1hcGkiLCJtZXRob2RzIjpbIm1ldGFhcGktYXBpOndzOnB1YmxpYzoqOioiXSwicm9sZXMiOlsicmVhZGVyIiwid3JpdGVyIl0sInJlc291cmNlcyI6WyJhY2NvdW50OiRVU0VSX0lEJDoxZmFiNDEwOS03MDQ5LTQ3YTctYWE2My0zYzM2MTEwZjcxZTMiXX0seyJpZCI6Im1ldGFhcGktcmVhbC10aW1lLXN0cmVhbWluZy1hcGkiLCJtZXRob2RzIjpbIm1ldGFhcGktYXBpOndzOnB1YmxpYzoqOioiXSwicm9sZXMiOlsicmVhZGVyIiwid3JpdGVyIl0sInJlc291cmNlcyI6WyJhY2NvdW50OiRVU0VSX0lEJDoxZmFiNDEwOS03MDQ5LTQ3YTctYWE2My0zYzM2MTEwZjcxZTMiXX0seyJpZCI6Im1ldGFzdGF0cy1hcGkiLCJtZXRob2RzIjpbIm1ldGFzdGF0cy1hcGk6cmVzdDpwdWJsaWM6KjoqIl0sInJvbGVzIjpbInJlYWRlciJdLCJyZXNvdXJjZXMiOlsiYWNjb3VudDokVVNFUl9JRCQ6MWZhYjQxMDktNzA0OS00N2E3LWFhNjMtM2MzNjExMGY3MWUzIl19LHsiaWQiOiJyaXNrLW1hbmFnZW1lbnQtYXBpIiwibWV0aG9kcyI6WyJyaXNrLW1hbmFnZW1lbnQtYXBpOnJlc3Q6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiXSwicmVzb3VyY2VzIjpbImFjY291bnQ6JFVTRVJfSUQkOjFmYWI0MTA5LTcwNDktNDdhNy1hYTYzLTNjMzYxMTBmNzFlMyJdfV0sImlnbm9yZVJhdGVMaW1pdHMiOmZhbHNlLCJ0b2tlbklkIjoiMjAyMTAyMTMiLCJpbXBlcnNvbmF0ZWQiOmZhbHNlLCJyZWFsVXNlcklkIjoiYzg0ZWQ1NjJjMjkxN2Q4MTU1NWVkNDQ4ZTc3NjMzZDAiLCJpYXQiOjE3ODMyODM3ODYsImV4cCI6MTc5MTA1OTc4Nn0.mgrEHouxzp6_uTewY926BLOgRUGTWqLDgbOvilTtKUGy9lP72b83eearNdPd5fltUr52Sf4bUReSqcZ7-HJRXwsl0apUxqJmQ7N1X0GNfVeEQkgtgDpnzXGvmV1WF73AvVpc3bvnG-jbecJzw5CLZQ2-b4AbPZldt0Yxp5BViiaqyO2X95uYMYmQcp2PJbjEHAeqJsGPJHaJsI1qqMjboWT0TsesGW94RFn8oBWdHK5rYtUhqQCkIEQZmuNi3rNImWjBHPcr9OflcGJE8sSqDF6Raib2pZrpXIr3c03IJy5IJtQD-7-NPHNIIxw7i5X7z8TvKLOwY4eBNM3dilttWnUZ0JZVOCbQEa0afb6bHoYqhQRgWfTxHRwNe11zYvnox6lO9VURya3OSGafxsrhiShOzn44VtWwyTawlD9_p56duC3EnrzdtboLDjzwS5G8_tE0539jfrO3hWiFQn2HeF4Nmr39DfSTAjb5RTKQD3iS2sNqAaCN9OBQqt2UAMbZYLHUuK0oP9k3R5ZUa31SKRIagBqjHIjaNCHkALR2rWCnGBWgzSsQHVxIHEyzgTxLuviOkc9abWV-76DD2nJ1R150n6acoG8eyoSPivxDMHx_v1xDSLtjbUKIqWq01wH7XSyfpXpEWFW9oG7FAjg1ctOH6nzhbii9nUnpj_RQCA8')
+ACCOUNT_ID     = ('1fab4109-7049-47a7-aa63-3c36110f71e3')
+TG_TOKEN       = ('8647261254:AAF-cuUYljqSgWMwC9F-sC9RH9tEm_nUUpU')
+OANDA_ACCOUNT  = ('101-004-28533521-003')
+OANDA_TOKEN    = ('0e282d5a3e65ad6fdd809e2c195bb1cd-9e2158e12fa13840e030ee3081b36fab')
 AVAILABLE_SYMBOLS = ['XAU_USD', 'XAU_EUR', 'XAG_USD', 'EUR_USD', 'GBP_JPY', 'GBP_AUD', 'GBP_NZD', 'AUD_JPY', 'NZD_JPY']
 SYMBOL_INFO = {
     'XAU_USD': {'pip_value': 0.1,     'contract_size': 100,    'prec': 2, 'name': 'Gold (USD)'},
@@ -152,17 +157,13 @@ _metaapi = None
 _metaapi_account = None
 _metaapi_conn = None
 
-# ── Live-quote push cache (WebSocket/streaming feed) ──
-# Populated by _GannPriceListener.on_symbol_price_updated, keyed by the
+# ── Live-quote push cache (OANDA REST poller) ──
+# Populated by oanda_live_price_poller, keyed by the
 # OANDA-format symbol used everywhere else in the bot ('XAU_USD'), NOT
 # the broker's own symbol name ('XAUUSD') -- _broker_to_data_symbol
 # translates incoming broker-symbol ticks back to that key.
 live_quotes: dict[str, dict] = {}          # {'XAU_USD': {'bid':, 'ask':, 'mid':, 'ts': monotonic}}
 _broker_to_data_symbol: dict[str, str] = {}  # {'XAUUSD': 'XAU_USD', ...}
-
-# Cap concurrent tick-processing tasks to prevent unbounded task pile-up
-# during high-frequency tick bursts.
-_tick_semaphore = asyncio.Semaphore(5)
 
 # Event-driven fill detection: map order_id -> asyncio.Event
 # A background task monitors terminal_state.positions and sets the event
@@ -176,192 +177,121 @@ _QUOTE_STALE_SECONDS = 5.0
 # be empty/wrong) and of _metaapi_account.connection_status (which the SDK
 # can keep reporting 'CONNECTED' even when the underlying WS session has
 # gone silent/zombie, e.g. during a broker daily-rollover freeze). The
-# watchdog in gann_monitor_scanner uses ONLY this raw timestamp to decide
+# watchdog in strategy_monitor_scanner uses ONLY this raw timestamp to decide
 # whether to force a full connection teardown+reconnect.
 _last_any_tick_ts = time.monotonic()
 _WS_WATCHDOG_STALE_SECONDS = 60.0
 
-# Per-symbol cache refreshed periodically by gann_monitor_scanner (levels,
-# trend state, each enabled tf's closed-candle data). _gann_tick_fire_check
-# reads this on every price tick -- refreshing it doesn't need tick-level
-# freshness, only the live price checked against it does, and that now
-# always comes straight from the tick that triggered the check.
-_gann_cache: dict[str, dict] = {}
-
-
 async def oanda_live_price_poller() -> None:
-    """Lightweight OANDA REST poller that replaces the old MetaAPI
-    WebSocket price feed. Every ~1.5s it hits OANDA's /v3/accounts/
-    {account_id}/pricing endpoint for all active symbols, updates the
-    global live_quotes[] cache (bid/ask/mid/ts), and immediately fires
-    _gann_tick_fire_check for each symbol just like the old listener did
-    -- so the Gann strategy reacts to the price instantly.
+    """OANDA streaming price feed (v3 pricing/stream), replacing the old
+    REST-polling version.
+
+    Two problems with the REST version, both root causes of the recurring
+    "Live price feed stale >60s" disconnects, are fixed by this:
+
+    1. Latency floor: REST polling was capped at one update per
+       poll_interval (1.5s) no matter what -- the stream instead pushes a
+       PRICE message the instant OANDA has one, and a HEARTBEAT roughly
+       every 5s even when the market is quiet, so live_quotes stays fresh
+       continuously instead of in 1.5s-apart snapshots.
+    2. Resource contention: the REST version acquired _get_oanda_sem()
+       (max 3 concurrent OANDA REST calls) for every single poll -- the
+       same semaphore backtest candle fetching uses. A backtest holding
+       all 3 slots for an extended stretch could starve this poller of a
+       turn entirely, which is very likely what was still causing
+       staleness even after the earlier fix that moved Excel generation
+       off the event loop. The stream instead opens ONE long-lived
+       connection outside that semaphore, so it has nothing to queue
+       behind regardless of what a backtest is doing.
+
+    OANDA's stream connections do get closed periodically by design (their
+    docs call this normal) -- the outer while True with backoff just
+    reconnects when that happens.
 
     MetaAPI is still used purely for order execution / reconciliation;
-    only the price feed has moved to OANDA REST polling.
+    only the price feed comes from OANDA.
     """
     global _last_any_tick_ts
-    headers = {'Authorization': f'Bearer {OANDA_TOKEN}', 'Content-Type': 'application/json'}
-    poll_interval = 1.5  # seconds (within the requested 1-2s window)
+    headers = {'Authorization': f'Bearer {OANDA_TOKEN}'}
+    stream_base = (OANDA_BASE_URL
+                    .replace('https://api-fxpractice.oanda.com', 'https://stream-fxpractice.oanda.com')
+                    .replace('https://api-fxtrade.oanda.com', 'https://stream-fxtrade.oanda.com'))
+    backoff = 1
     while True:
         try:
             active_syms = [s for s, on in bot_state['active_symbols'].items() if on]
             if not active_syms:
-                await asyncio.sleep(poll_interval)
+                await asyncio.sleep(2)
                 continue
 
             instruments = ','.join(active_syms)
-            url = f'{OANDA_BASE_URL}/accounts/{OANDA_ACCOUNT}/pricing'
+            url = f'{stream_base}/accounts/{OANDA_ACCOUNT}/pricing/stream'
             params = {'instruments': instruments}
-            async with _get_oanda_sem():
-                async with get_http().get(
-                    url, headers=headers, params=params,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
+            timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=30)
+
+            # Dedicated session for this one long-lived connection -- kept
+            # separate from get_http()'s shared pool and deliberately does
+            # NOT go through _get_oanda_sem(); see docstring above.
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.get(url, headers=headers, params=params) as resp:
                     if resp.status != 200:
-                        c_log(f"oanda_live_price_poller: pricing request failed (status {resp.status}).")
-                        await asyncio.sleep(poll_interval)
+                        c_log(f"oanda_live_price_poller: stream connect failed (status {resp.status}).")
+                        await asyncio.sleep(backoff); backoff = min(backoff * 2, 30)
                         continue
-                    data = await resp.json()
 
-            now_mono = time.monotonic()
-            _last_any_tick_ts = now_mono  # feed-health heartbeat for the staleness watchdog
-            for price in data.get('prices', []):
-                sym = price.get('instrument')
-                if sym not in bot_state['active_symbols'] or not bot_state['active_symbols'][sym]:
-                    continue
-                bids = price.get('bids') or []
-                asks = price.get('asks') or []
-                if not bids or not asks:
-                    continue
-                try:
-                    bid = float(bids[0]['price'])
-                    ask = float(asks[0]['price'])
-                except (KeyError, ValueError, TypeError):
-                    continue
-                mid = (bid + ask) / 2.0
-                live_quotes[sym] = {'bid': bid, 'ask': ask, 'mid': mid, 'ts': now_mono}
-                # React to THIS price right now, exactly as the old
-                # MetaAPI listener did -- separate task so the poll loop
-                # never blocks on the (awaited) I/O inside the check.
-                _safe_task(_gann_tick_fire_check(sym, mid, 0.0), 'tick_fire_check')
+                    backoff = 1
+                    c_log("oanda_live_price_poller: stream connected.")
+                    async for raw_line in resp.content:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        try:
+                            msg = json.loads(line)
+                        except (json.JSONDecodeError, ValueError):
+                            continue
 
-            await asyncio.sleep(poll_interval)
+                        if msg.get('type') == 'HEARTBEAT':
+                            # Still proof-of-life even with no price movement.
+                            _last_any_tick_ts = time.monotonic()
+                            continue
+                        if msg.get('type') != 'PRICE':
+                            continue
+
+                        sym = msg.get('instrument')
+                        if sym not in bot_state['active_symbols'] or not bot_state['active_symbols'][sym]:
+                            continue
+                        bids = msg.get('bids') or []
+                        asks = msg.get('asks') or []
+                        if not bids or not asks:
+                            continue
+                        try:
+                            bid = float(bids[0]['price'])
+                            ask = float(asks[0]['price'])
+                        except (KeyError, ValueError, TypeError):
+                            continue
+
+                        now_mono = time.monotonic()
+                        _last_any_tick_ts = now_mono  # feed-health heartbeat for the staleness watchdog
+                        mid = (bid + ask) / 2.0
+                        live_quotes[sym] = {'bid': bid, 'ask': ask, 'mid': mid, 'ts': now_mono}
+
+                        # If active symbols changed since we opened this
+                        # stream (user toggled a pair on/off), reconnect
+                        # with the updated instrument list instead of
+                        # silently missing the new one.
+                        if [s for s, on in bot_state['active_symbols'].items() if on] != active_syms:
+                            break
         except asyncio.CancelledError:
             raise
         except Exception as e:
             log_exception('oanda_live_price_poller', e)
-            await asyncio.sleep(poll_interval)
+            await asyncio.sleep(backoff); backoff = min(backoff * 2, 30)
 
 
 def _safe_task(coro, name=''):
     t = asyncio.create_task(coro)
     t.add_done_callback(lambda fut: log_exception(f'background task [{name}]', fut.exception()) if not fut.cancelled() and fut.exception() else None)
     return t
-
-async def _gann_tick_fire_check(symbol: str, live_px: float, feed_age_ms: float) -> None:
-    """The actual touch decision, run the instant a new tick arrives (called
-    via create_task from _GannPriceListener.on_symbol_price_updated). Uses
-    whatever levels/trend/candle data gann_monitor_scanner's periodic
-    refresh last cached for this symbol in _gann_cache -- but the PRICE
-    checked against that data is always this exact tick, never a value
-    read back out of a timer loop. That's what makes firing on a stale
-    quote structurally impossible now, not just less likely."""
-    # Backpressure: if 5 tick checks are already running, skip this tick
-    if _tick_semaphore.locked():
-        return
-    async with _tick_semaphore:
-        try:
-            if bot_state.get('connection_state') != CONN_RUNNING:
-                return
-            if bot_state.get('live_daily_hit'):
-                return
-            cache = _gann_cache.get(symbol)
-            if not cache:
-                return
-            sym_state = bot_state['symbol_state'][symbol]
-            if not sym_state['gann_cycle_active'] or not sym_state['gann_levels']:
-                return
-
-            max_concurrent = max(1, int(bot_state.get('prot_max_concurrent_trades', 4)))
-            open_count = sum(1 for v in sym_state['gann_open_trades'].values() if isinstance(v, dict))
-            if open_count >= max_concurrent:
-                return
-
-            margin = cache['margin']; levels = cache['levels']; trend_up = cache['trend_up']
-            entry_mode = sym_state['gann_entry_mode']
-            exec_mode = bot_state.get('gann_execution_mode', 'instant')
-            pv = SYMBOL_INFO[symbol]['pip_value']
-            spike_limit = bot_state.get('gann_spike_limit_pts', 20) * pv
-            flt_type = sym_state['trend_filter_type']; ttf = sym_state['trend_timeframe']
-            detect_time = datetime.now(timezone.utc)
-
-            for tf in cache['enabled_tfs']:
-                if any(isinstance(v, dict) and v.get('tf') == tf for v in sym_state['gann_open_trades'].values()):
-                    continue
-                tf_data = cache['tf_data'].get(tf)
-                if not tf_data:
-                    continue
-                candles = tf_data['candles']; closed_close = tf_data['closed_close']
-
-                if entry_mode == 'touch_trend' and trend_up is None:
-                    continue
-
-                if exec_mode == 'all_concurrent':
-                    channels = ['touch', 'close', 'hybrid']
-                elif exec_mode == 'close':
-                    channels = ['close']
-                elif exec_mode == 'hybrid':
-                    channels = ['hybrid']
-                else:
-                    channels = ['touch']
-
-                for channel in channels:
-                    for lv in levels:
-                        k = lv['key']; dir_ = lv['dir']
-                        base_combo = f"{k}_{tf}" if bot_state['prot_allow_multi_tf'] else k
-                        combo_key = f"{base_combo}_{channel}" if exec_mode == 'all_concurrent' else base_combo
-                        if sym_state['gann_level_status'].get(combo_key) == 'used':
-                            continue
-                        is_buy = (dir_ == 'dn')
-                        if entry_mode == 'touch_trend':
-                            if is_buy and not trend_up: continue
-                            if not is_buy and trend_up: continue
-
-                        q = live_quotes.get(symbol, {})
-                        check_px = q.get('bid' if is_buy else 'ask') or live_px
-
-                        if channel == 'close':
-                            if abs(closed_close - lv['price']) > margin:
-                                continue
-                        elif channel == 'hybrid':
-                            if abs(check_px - lv['price']) > margin:
-                                continue
-                            if abs(check_px - closed_close) > spike_limit:
-                                continue
-                        else:
-                            if abs(check_px - lv['price']) > margin:
-                                continue
-
-                        sym_state['gann_level_status'][combo_key] = 'used'
-
-                        if flt_type == 'vwap': flt_label = f"VWAP={sym_state['trend_vwap_period']}\n"
-                        elif flt_type == 'ema': flt_label = f"EMA={sym_state['trend_ema_period']}\n"
-                        else: flt_label = "VWAP+EMA"
-                        trigger_lbl = {'touch': 'لمس مباشر ⚡', 'close': 'إغلاق شمعة ⏳', 'hybrid': 'تنفيذ هجين 🛡️'}[channel]
-                        dir_word = 'BUY' if is_buy else 'SELL'
-                        dir_emoji = '📈' if is_buy else '📉'
-                        reason = f"{dir_word} {dir_emoji} [{symbol} - جان {tf}] {trigger_lbl} (مع {flt_label}_{ttf.upper()})"
-
-                        t1_signal_ts = time.monotonic()
-                        await _gann_open_trade(symbol, is_buy, lv, candles, reason=reason, tf=tf,
-                                                initial_px=live_px, detect_time=detect_time, t1_signal_ts=t1_signal_ts,
-                                                feed_source='ws', feed_age_ms=feed_age_ms, trigger_type=channel,
-                                                combo_key=combo_key)
-                        break
-        except Exception as e:
-            log_exception(f"_gann_tick_fire_check [{symbol}]", e)
-
 
 def _is_market_hours_now() -> bool:
     """Rough broker session-hours check (from the real XAUUSD symbol spec:
@@ -387,7 +317,7 @@ async def _force_full_reconnect(reason: str) -> None:
     and reconciliation. If the connection goes zombie/degraded, new orders
     fail -- this tears the existing connection down and rebuilds it from
     scratch (with bounded timeouts so a hung SDK region can never freeze
-    the gann_monitor_scanner loop forever)."""
+    the strategy_monitor_scanner loop forever)."""
     global _metaapi_conn
     c_log(f"EXEC WATCHDOG: forcing full reconnect -- {reason}")
     await set_connection_state(CONN_READ_ONLY, f"Exec watchdog: {reason}")
@@ -514,7 +444,14 @@ async def set_connection_state(new_state: str, reason: str) -> None:
         bot_state['connection_state_reason'] = reason
     logger.warning("Connection state: %s -> %s (%s)", old_state, new_state, reason)
     now = time.monotonic()
-    if now - _last_state_notify_ts < 10.0:
+    # Debounce Telegram notifications: a real transition (old_state !=
+    # new_state, already checked above) always logs, but only sends a
+    # message if we haven't already alerted within the last 5 minutes.
+    # This is what stops rapid RUNNING<->READ_ONLY flapping (e.g. a
+    # borderline-stale feed recovering and going stale again every few
+    # seconds) from spamming Telegram with one message per flap.
+    _STATE_NOTIFY_COOLDOWN_SECONDS = 300.0
+    if now - _last_state_notify_ts < _STATE_NOTIFY_COOLDOWN_SECONDS:
         return
     _last_state_notify_ts = now
     icon = {'RUNNING': '\u2705', 'READ_ONLY': '\U0001F7E1', 'HALTED': '\U0001F6D1'}.get(new_state, '\u2139')
@@ -623,12 +560,10 @@ PRESETS_FILE = os.path.join(DATA_DIR, 'presets.json')
 TEMP_PRESETS_FILE = os.path.join(DATA_DIR, 'presets.tmp')
 
 # Live runtime fields that a preset must never capture or restore --
-# includes gann_last_h1_time/gann_cycle_started_at (raw datetime objects,
-# not JSON-serializable at all) plus other in-flight state that belongs to
-# whatever is currently running, not to a saved settings snapshot.
+# in-flight state that belongs to whatever is currently running, not to a
+# saved settings snapshot.
 _PRESET_EXCLUDED_KEYS = {
-    'gann_levels', 'gann_level_status', 'gann_cycle_active', 'gann_open_trades',
-    'gann_last_h1_time', 'gann_cycle_started_at', 'auto_trade',
+    'strategy_open_trades', 'auto_trade',
 }
 
 # Event-loop I/O offloading (v9.5): json.dump + os.fsync + os.replace are
@@ -654,13 +589,13 @@ def _write_persistence_file_sync(data: dict) -> None:
 async def save_bot_persistence() -> None:
     """Atomic write: full operational state AND full settings, so a hard
     restart reconstructs the bot's world exactly -- not just open trades
-    and Gann cycle state, but every user-configured setting (lot size,
-    protection limits, anchor timeframe, filters, TP/SL config, etc).
+    and per-symbol strategy state, but every user-configured setting (lot
+    size, protection limits, monitored timeframes, TP/SL config, etc).
 
     Deliberately exclude-list based, not include-whitelist based: the
     previous version only ever saved a fixed list of live trade-state
-    fields, which meant lot size, protection dd/profit limits, the anchor
-    timeframe, and effectively every other setting were NEVER actually
+    fields, which meant lot size, protection dd/profit limits, monitored
+    timeframes, and effectively every other setting were NEVER actually
     persisted -- even though save_bot_persistence() was correctly being
     called after every mutation. An exclude-list means any new setting
     added later is persisted automatically instead of silently dropped
@@ -677,10 +612,7 @@ async def save_bot_persistence() -> None:
         symbol_snapshot = {}
         for sym in sorted(bot_state['active_symbols'].keys()):
             ss = bot_state['symbol_state'].get(sym) or {}
-            snap = {k: v for k, v in ss.items() if k not in ('gann_last_h1_time', 'gann_cycle_started_at')}
-            snap['gann_last_h1_time'] = ss.get('gann_last_h1_time').isoformat() if ss.get('gann_last_h1_time') else None
-            snap['gann_cycle_started_at'] = ss.get('gann_cycle_started_at').isoformat() if ss.get('gann_cycle_started_at') else None
-            symbol_snapshot[sym] = snap
+            symbol_snapshot[sym] = dict(ss)
 
         data = {
             'schema_version': 3,
@@ -737,21 +669,15 @@ async def load_bot_persistence():
                     continue
                 ss = bot_state['symbol_state'][sym]
                 for k, v in snap.items():
-                    if k in ('gann_last_h1_time', 'gann_cycle_started_at'):
-                        continue
                     if k in ss:  # same safety principle as top-level: only restore known fields
                         ss[k] = v
-                lh1 = snap.get('gann_last_h1_time')
-                ss['gann_last_h1_time'] = pd.Timestamp(lh1).to_pydatetime() if lh1 else None
-                csa = snap.get('gann_cycle_started_at')
-                ss['gann_cycle_started_at'] = pd.Timestamp(csa).to_pydatetime() if csa else None
         else:
             # Backward-compat with the oldest schema (open trades only).
-            for sym, trades in data.get('gann_open_trades', {}).items():
+            for sym, trades in data.get('strategy_open_trades', data.get('strategy_open_trades', {})).items():
                 if sym in bot_state['symbol_state']:
-                    bot_state['symbol_state'][sym]['gann_open_trades'] = trades
+                    bot_state['symbol_state'][sym]['strategy_open_trades'] = trades
 
-        c_log("Bot state restored from persistence file (settings, open trades, Gann cycle state, daily PnL).")
+        c_log("Bot state restored from persistence file (settings, open trades, strategy state, daily PnL).")
     except Exception as e:
         # If the persistence file is corrupt we must not silently pretend
         # we're starting clean while real broker positions may still be
@@ -773,14 +699,8 @@ bot_state: dict = {
     'is_live_twin_running': False,
     'timeframes':       _TFS,
 
-    # ── Live execution mode (Instant / Close / Hybrid) ──
-    # Default 'instant' == the scanner's existing, unchanged behavior
-    # (check live_px against the level margin and fire immediately).
-    # Nothing about current live trading changes until this is toggled.
-    'gann_execution_mode': 'instant',
     'lt_latency_ms_min': 160,   # measured Railway-deployment -> broker round-trip ping
     'lt_latency_ms_max': 200,   # (update again if a future diagnostic run measures differently)
-    'gann_spike_limit_pts': 20,   # hybrid mode: block entry if live_px has moved this many points past the last closed candle's close
 
     # ── Live-Twin Engine (realistic execution simulator) ──
     # Baseline spread taken from a live MT5/OANDA tick snapshot on
@@ -788,7 +708,7 @@ bot_state: dict = {
     # Bid 4112.28 / Ask 4112.62 -> 0.34 USD (34 points at tick=0.01).
     # This is the QUIET-SESSION floor; session/volatility multipliers
     # scale it up or down from here, they never invent a new baseline.
-    'lt_mode': 'realistic',        # 'realistic' or 'idealized' (idealized == old run_gann_backtest, zero friction, kept as A/B baseline)
+    'lt_mode': 'realistic',        # 'realistic' or 'idealized' (idealized == old run_strategy_backtest, zero friction, kept as A/B baseline)
     'lt_base_spread_usd': 0.34,
     'lt_friction': {
         'spread':    True,   # dynamic session/volatility spread model
@@ -824,50 +744,33 @@ bot_state: dict = {
     'live_daily_hit': False,
 
     # ── Gann Levels Engine ──
+    # -- EMA/Stochastic Strategy Engine --
     'active_symbols': {s: (s == 'XAU_USD') for s in AVAILABLE_SYMBOLS},
     'ui_selected_symbol': 'XAU_USD',
     'symbol_state': {s: {
-        'gann_levels': [],
-        'gann_level_status': {},
-        'gann_close_used': None,
-        'gann_last_h1_time': None,
-        'gann_cycle_active': False,
-        'gann_cycle_started_at': None,
-        'gann_open_trades': {},
+        'strategy_open_trades': {},
         'auto_trade': False,
         'lot_size': 0.05,
-        'gann_cycle_hours': 1,
-        'gann_zone_filter': 'star',  
-        'gann_entry_mode': 'touch_trend', 
-        'trend_filter_type': 'ema',     
-        'trend_vwap_period': 100,
-        'trend_ema_period': 60,
-        'trend_timeframe': '1h',    
         'break_even_enabled': False,
-        'gann_be_trigger_points': 40,
-        'gann_monitor_tfs': {tf: (tf in ['5m', '10m', '15m', '20m', '30m', '1h', '4m', '6m', '2h', '1m', '2m', '3m']) for tf in _TFS},
-        'gann_touch_margin_pts': 5,       
-        'gann_tpsl_mode': 'fixed', 
-        'gann_tp_points': 70,
-        'gann_sl_points': 110,
-        'gann_tp_per_tf': {tf: 0 for tf in _TFS},
-        'gann_sl_per_tf': {tf: 0 for tf in _TFS},
-        'gann_atr_period': 14,
-        'gann_atr_sl_mult': 1.5,
-        'gann_atr_tp_mult': 2,
+        'strategy_be_trigger_points': 40,
+        'strategy_monitor_tfs': {tf: (tf in ['5m', '10m', '15m', '20m', '30m', '1h', '4m', '6m', '2h', '1m', '2m', '3m']) for tf in _TFS},
+        'strategy_tpsl_mode': 'fixed',
+        'strategy_tp_points': 70,
+        'strategy_sl_points': 110,
+        'strategy_tp_per_tf': {tf: 0 for tf in _TFS},
+        'strategy_sl_per_tf': {tf: 0 for tf in _TFS},
+        'strategy_atr_period': 14,
+        'strategy_atr_sl_mult': 1.5,
+        'strategy_atr_tp_mult': 2,
+        # Dedup: last (per-tf) closed-candle timestamp a signal was already
+        # evaluated for, so the candle-close scanner never fires twice off
+        # the same candle. Keyed by tf -> ISO string (kept JSON-safe).
+        'strategy_last_signal_candle': {},
     } for s in AVAILABLE_SYMBOLS},
-    
-# ── Filter Type (star, star_fan, all) ──
-    
-    
-    
-    # ── Trend Filters ──
-    
-    
-    
-    
-    
-    # ── Trade Management ──
+
+    # -- Trade Management --
+    'signal_candle_shift': 1,          # 0 = live/forming candle, 1 = last closed, 2 = previous closed
+    'allow_concurrent_trades': False,  # if False: block a new Buy while a Buy is open (same for Sell)
     
     'prot_daily_dd_usd':      200,
     'prot_daily_profit_usd':  150,
@@ -894,26 +797,13 @@ bot_state: dict = {
     # not throwaway diagnostics, and must survive a bot restart.
     'live_trade_history': [],
     'prot_stale_filter': True,
-    'prot_cycle_inval': True,
-    'prot_cycle_inval_pts': 200,
-    'gann_anchor_tf': '1h',
     'prot_allow_multi_tf':    True,
 
     # ── Broker/display time alignment ──
     # Hours to add to raw UTC (from OANDA/MetaApi) to reach the broker's
-    # own server clock (what the user's MT5 terminal displays). Used to
-    # align "last closed anchor candle" boundary detection to the SAME
-    # wall-clock boundaries MT5 shows, not raw UTC ones. Default 3 =
+    # own server clock (what the user's MT5 terminal displays).  Default 3 =
     # Damascus/EET-DST-style broker offset.
     'broker_time_offset': 3,
-
-    # ── Gann level calculation mode ──
-    # 'static_h1'   : classic behavior -- levels are (re)anchored only when
-    #                 a new anchor-tf (H1/H4) candle closes.
-    # 'dynamic_live': ignore candle closes; recompute levels every
-    #                 GANN_DYNAMIC_RECALC_MINUTES using the current live
-    #                 streamed price. Toggle in the Telegram protection menu.
-    'gann_calculation_mode': 'static_h1',
 
     
     
@@ -1216,89 +1106,89 @@ async def fetch_master_price(symbol: str) -> float | None:
     return float(mc[-1]['close'])
 
 # ─────────────────────────────────────────────────────────────
-# GANN LEVELS & FAN ENGINE (⭐ & ⭐🌀)
+# STRATEGY CORE: EMA 15/50/150 trend stack + Stochastic(5,5,5, EMA-smoothed)
+# reversal-zone crossover. Evaluated strictly on candle close (see
+# bot_state['signal_candle_shift']: 0 = live/forming candle, 1 = last
+# closed candle, 2 = the one before that).
 # ─────────────────────────────────────────────────────────────
-GANN_TFC_H1 = 0.02
+STRAT_EMA_FAST = 15
+STRAT_EMA_MED = 50
+STRAT_EMA_SLOW = 150
+STRAT_STOCH_K = 5
+STRAT_STOCH_D = 5
+STRAT_STOCH_SLOWING = 5
+STRAT_STOCH_BUY_LEVEL = 20    # crossover must occur with both lines <= this
+STRAT_STOCH_SELL_LEVEL = 80   # crossover must occur with both lines >= this
+STRAT_STOCH_DEEP_BUY_LEVEL = 10   # secondary reference level (display/diagnostics only)
+STRAT_STOCH_DEEP_SELL_LEVEL = 90  # secondary reference level (display/diagnostics only)
+STRAT_MIN_CANDLES = STRAT_EMA_SLOW + STRAT_STOCH_K + STRAT_STOCH_D + STRAT_STOCH_SLOWING + 10
 
-# تصنيف دقيق للمستويات (مطابق تماماً لتطبيق OTC-Calculator المرجعي):
-# star = المستويات الأصلية القوية (AIMP في الأصل: انحصرت في 0.0833, 0.5, 1.0 فقط)
-# fan  = "موازي للمروحة" -- في الأصل هذا يعني معامل الزاوية 0.125 (8x1) حصراً،
-#        وليس أي معامل آخر. القائمة الأصلية (ACOEF) فيها 11 معامل فقط --
-#        لا يوجد 3.0 ولا 8.0 إطلاقاً.
-GANN_COEFS = [
-    {'c': 0.0208, 'star': False, 'fan': False},
-    {'c': 0.0417, 'star': False, 'fan': False},
-    {'c': 0.0625, 'star': False, 'fan': False},
-    {'c': 0.0833, 'star': True,  'fan': False},
-    {'c': 0.125,  'star': False, 'fan': True},  # 8x1 -- الوحيد الذي يُعتبر "موازي للمروحة"
-    {'c': 0.25,   'star': False, 'fan': False},
-    {'c': 0.333,  'star': False, 'fan': False},
-    {'c': 0.5,    'star': True,  'fan': False},
-    {'c': 1.0,    'star': True,  'fan': False},
-    {'c': 2.0,    'star': False, 'fan': False},
-    {'c': 4.0,    'star': False, 'fan': False},
-]
+def compute_strategy_indicators(candles: list) -> "pd.DataFrame | None":
+    """EMA 15/50/150 (standard EMA) + Stochastic Oscillator with
+    %K period=5, %D period=5, Slowing=5, MA_Method=EMA (i.e. the raw %K is
+    EMA-smoothed for the slowed %K line, and that slowed %K is EMA-smoothed
+    again for %D) -- matches MT5's Stochastic Oscillator indicator with
+    MA Method set to Exponential. Returns None if there isn't enough
+    history to trust EMA150 + the Stochastic lookback."""
+    if not candles or len(candles) < STRAT_MIN_CANDLES:
+        return None
+    df = pd.DataFrame(candles)
+    df['ema15'] = df['close'].ewm(span=STRAT_EMA_FAST, adjust=False).mean()
+    df['ema50'] = df['close'].ewm(span=STRAT_EMA_MED, adjust=False).mean()
+    df['ema150'] = df['close'].ewm(span=STRAT_EMA_SLOW, adjust=False).mean()
+    low_min = df['low'].rolling(window=STRAT_STOCH_K).min()
+    high_max = df['high'].rolling(window=STRAT_STOCH_K).max()
+    rng = (high_max - low_min).replace(0, np.nan)
+    raw_k = 100.0 * (df['close'] - low_min) / rng
+    raw_k = raw_k.fillna(50.0)
+    df['stoch_k'] = raw_k.ewm(span=STRAT_STOCH_SLOWING, adjust=False).mean()   # slowed %K (EMA method)
+    df['stoch_d'] = df['stoch_k'].ewm(span=STRAT_STOCH_D, adjust=False).mean()  # %D (EMA of slowed %K)
+    return df
 
-def _anchor_hours() -> int:
-    """Hour-equivalent of the selected Gann anchor timeframe."""
-    return 4 if bot_state.get('gann_anchor_tf', '1h') == '4h' else 1
+def evaluate_strategy_signal(df: "pd.DataFrame", shift: int) -> dict | None:
+    """Evaluate the entry rules at candle index N = shift (0 = most recent
+    row in df i.e. the live/forming candle as fetched, 1 = last closed,
+    2 = previous closed). Returns a dict with 'is_buy' and diagnostic
+    values on a valid signal, or None."""
+    idx = len(df) - 1 - shift
+    prev_idx = idx - 1
+    if idx < 1 or prev_idx < 0:
+        return None
+    ema15, ema50, ema150 = df['ema15'].iloc[idx], df['ema50'].iloc[idx], df['ema150'].iloc[idx]
+    k, d = df['stoch_k'].iloc[idx], df['stoch_d'].iloc[idx]
+    k_prev, d_prev = df['stoch_k'].iloc[prev_idx], df['stoch_d'].iloc[prev_idx]
+    if any(pd.isna(v) for v in (ema15, ema50, ema150, k, d, k_prev, d_prev)):
+        return None
 
-def _anchor_label() -> str:
-    """Display label ('H1'/'H4') matching the selected anchor timeframe --
-    used everywhere a message previously hardcoded the literal text 'H1'."""
-    return bot_state.get('gann_anchor_tf', '1h').upper()
+    cross_up = (k_prev <= d_prev) and (k > d)
+    cross_down = (k_prev >= d_prev) and (k < d)
 
-def gann_calc_levels(symbol: str, close: float) -> list[dict]:
-    levels = []
-    anchor_tf = bot_state.get('gann_anchor_tf', '1h')
-    multiplier = GANN_TFC_H1 * 2.0 if anchor_tf == '4h' else GANN_TFC_H1
-    
-    for i, item in enumerate(GANN_COEFS):
-        offset = close * item['c'] * multiplier
-        prec = SYMBOL_INFO[symbol]['prec']
-        up = round(close + offset, prec)
-        dn = round(close - offset, prec)
-        
-        # التسميات الدقيقة
-        up_lbl = "مقاومة"
-        dn_lbl = "دعم"
-        if item['star'] and not item['fan']:
-            up_lbl = "مقاومة ⭐"
-            dn_lbl = "دعم ⭐"
-        elif item['star'] and item['fan']:
-            up_lbl = "مقاومة ⭐"
-            dn_lbl = "دعم ⭐"
-        elif item['fan']:
-            up_lbl = "مقاومة موازية للمروحة 🌀"
-            dn_lbl = "دعم موازي للمروحة 🌀"
-            
-        levels.append({'key': f'up_{i}', 'price': up, 'dir': 'up', 'star': item['star'], 'fan': item['fan'], 'label': up_lbl})
-        if dn > 0:
-            levels.append({'key': f'dn_{i}', 'price': dn, 'dir': 'dn', 'star': item['star'], 'fan': item['fan'], 'label': dn_lbl})
-            
-    levels.append({'key': 'ref', 'price': round(close, SYMBOL_INFO[symbol]['prec']), 'dir': 'ref', 'star': False, 'fan': False, 'label': f'إغلاق {_anchor_label()}'})
-    levels.sort(key=lambda x: x['price'], reverse=True)
-    return levels
+    # Zone check uses the PRE-cross bar (k_prev/d_prev), not the bar the
+    # cross completes on. %D lags %K (it's a further EMA smoothing of it),
+    # so by the moment %K finishes crossing above %D, %D has often already
+    # started drifting out of the 10-20 zone -- checking the zone one bar
+    # earlier still requires the cross to have originated from inside the
+    # oversold/overbought zone, without discarding valid crosses purely
+    # because %D was a hair slow to follow.
+    if ema15 > ema50 > ema150 and cross_up and k_prev <= STRAT_STOCH_BUY_LEVEL and d_prev <= STRAT_STOCH_BUY_LEVEL:
+        return {'is_buy': True, 'ema15': ema15, 'ema50': ema50, 'ema150': ema150, 'k': k, 'd': d,
+                'candle_time': df['time'].iloc[idx] if 'time' in df.columns else None}
+    if ema150 > ema50 > ema15 and cross_down and k_prev >= STRAT_STOCH_SELL_LEVEL and d_prev >= STRAT_STOCH_SELL_LEVEL:
+        return {'is_buy': False, 'ema15': ema15, 'ema50': ema50, 'ema150': ema150, 'k': k, 'd': d,
+                'candle_time': df['time'].iloc[idx] if 'time' in df.columns else None}
+    return None
 
-def gann_active_levels(symbol: str) -> list[dict]:
+def _strategy_tf_tp(symbol: str, tf: str) -> int:
     sym_state = bot_state['symbol_state'][symbol]
-    lv = [l for l in bot_state['symbol_state'][symbol]['gann_levels'] if l['dir'] != 'ref']
-    f = sym_state['gann_zone_filter']
-    if f == 'star': return [l for l in lv if l['star']]
-    elif f == 'star_fan': return [l for l in lv if l['star'] or l['fan']]
-    return lv
+    v = sym_state['strategy_tp_per_tf'].get(tf, 0)
+    return v if v > 0 else sym_state['strategy_tp_points']
 
-def _gann_tf_tp(symbol: str, tf: str) -> int:
+def _strategy_tf_sl(symbol: str, tf: str) -> int:
     sym_state = bot_state['symbol_state'][symbol]
-    v = sym_state['gann_tp_per_tf'].get(tf, 0)
-    return v if v > 0 else sym_state['gann_tp_points']
+    v = sym_state['strategy_sl_per_tf'].get(tf, 0)
+    return v if v > 0 else sym_state['strategy_sl_points']
 
-def _gann_tf_sl(symbol: str, tf: str) -> int:
-    sym_state = bot_state['symbol_state'][symbol]
-    v = sym_state['gann_sl_per_tf'].get(tf, 0)
-    return v if v > 0 else sym_state['gann_sl_points']
-
-def _gann_atr(candles: list, period: int) -> float | None:
+def _strategy_atr(candles: list, period: int) -> float | None:
     """Compute ATR using pure NumPy (no pandas overhead).
     If `candles` is None, returns None (cache miss)."""
     if candles is None or len(candles) < period + 1:
@@ -1324,81 +1214,20 @@ def _gann_atr(candles: list, period: int) -> float | None:
     atr = float(np.mean(tr[-period:]))
     return atr
 
-def _gann_calc_tpsl(symbol: str, entry: float, is_buy: bool, candles: list, tf: str = '') -> tuple[float, float]:
+def _strategy_calc_tpsl(symbol: str, entry: float, is_buy: bool, candles: list, tf: str = '') -> tuple[float, float]:
     sym_state = bot_state['symbol_state'][symbol]
     pv = SYMBOL_INFO[symbol]['pip_value']
     prec = SYMBOL_INFO[symbol]['prec']
-    if sym_state['gann_tpsl_mode'] == 'atr':
-        # Try cached ATR first (pre-computed in gann_cycle_manager)
-        atr = sym_state.get('gann_atr_cache', {}).get(tf)
-        if atr is None and candles:
-            atr = _gann_atr(candles, sym_state['gann_atr_period'])  # fallback
-        if not atr: atr = _gann_tf_sl(symbol, tf) * pv
-        sl_dist = atr * sym_state['gann_atr_sl_mult']
-        tp_dist = atr * sym_state['gann_atr_tp_mult']
+    if sym_state['strategy_tpsl_mode'] == 'atr':
+        atr = _strategy_atr(candles, sym_state['strategy_atr_period']) if candles else None
+        if not atr: atr = _strategy_tf_sl(symbol, tf) * pv
+        sl_dist = atr * sym_state['strategy_atr_sl_mult']
+        tp_dist = atr * sym_state['strategy_atr_tp_mult']
     else:
-        sl_dist = _gann_tf_sl(symbol, tf) * pv
-        tp_dist = _gann_tf_tp(symbol, tf) * pv
+        sl_dist = _strategy_tf_sl(symbol, tf) * pv
+        tp_dist = _strategy_tf_tp(symbol, tf) * pv
     if is_buy: return round(entry + tp_dist, prec), round(entry - sl_dist, prec)
     return round(entry - tp_dist, prec), round(entry + sl_dist, prec)
-
-def _last_closed_anchor_time_utc(anchor_hours: int, offset_hours: float, now_utc: datetime) -> datetime:
-    """UTC timestamp of the OPEN of the most recently fully-closed anchor-tf
-    bucket, computed against BROKER server time (UTC + broker_time_offset)
-    rather than raw UTC. For a whole-hour offset this makes no difference
-    to a 1h anchor (hourly boundaries land on the same instants in any
-    whole-hour-offset zone), but it matters for a 4h anchor: OANDA's raw-UTC
-    4h grid (00/04/08/12/16/20 UTC) is NOT the same set of instants as the
-    broker's UTC+offset 4h grid, so blindly trusting OANDA's own bucketing
-    can hand the bot a Gann anchor close that doesn't match what closes on
-    the user's MT5 terminal."""
-    broker_now = now_utc + timedelta(hours=offset_hours)
-    floored = broker_now.replace(minute=0, second=0, microsecond=0)
-    bucket_start_hour = (floored.hour // anchor_hours) * anchor_hours
-    bucket_start_broker = floored.replace(hour=bucket_start_hour)
-    return bucket_start_broker - timedelta(hours=offset_hours)
-
-async def _gann_fetch_last_closed_anchor(symbol: str) -> dict | None:
-    anchor_tf = bot_state.get('gann_anchor_tf', '1h')
-    anchor_hours = _anchor_hours()
-    offset = bot_state.get('broker_time_offset', 3)
-    target_close_utc = _last_closed_anchor_time_utc(anchor_hours, offset, datetime.now(timezone.utc))
-    # Fetch a small pad of extra candles (not just 2) since the broker-
-    # aligned boundary can fall a bucket or two behind OANDA's own most
-    # recent closed candle once the offset shifts the grid.
-    candles = await fetch_candles(symbol, anchor_tf, count=anchor_hours + 6)
-    if not candles: return None
-    candles = sorted(candles, key=lambda c: c['time'])
-    # Pick the newest candle whose close does not exceed the broker-aligned
-    # boundary -- NOT simply candles[-1], which is only correct when
-    # OANDA's raw-UTC grid happens to coincide with the broker's grid.
-    eligible = [c for c in candles if c['time'].to_pydatetime() <= target_close_utc]
-    return eligible[-1] if eligible else candles[-1]
-
-def _gann_fmt_levels_msg(symbol: str, close: float) -> str:
-    sym_state = bot_state['symbol_state'][symbol]
-    lines = []
-    for l in bot_state['symbol_state'][symbol]['gann_levels']:
-        if l['dir'] == 'ref':
-            lines.append(f"➖ <b>{l['price']:.2f}</b>  (إغلاق {_anchor_label()})")
-            continue
-        
-        icon = '🔴' if l['dir'] == 'up' else '🟢'
-        lines.append(f"{icon} {l['price']:.2f}  {l['label']}")
-        
-    f_mode = sym_state['gann_zone_filter']
-    if f_mode == 'star': filt = '⭐ المستويات الأصلية القوية فقط'
-    elif f_mode == 'star_fan': filt = '⭐🌀 القوية + الموازية للمروحة'
-    else: filt = '📋 كل المستويات (مخاطرة)'
-    
-    flt_trend = sym_state['trend_filter_type'].upper()
-    if flt_trend == 'BOTH': flt_trend = 'VWAP + EMA'
-    
-    mode = f'لمس مباشر + فلتر ({flt_trend}_{sym_state["trend_timeframe"].upper()})' if sym_state['gann_entry_mode'] == 'touch_trend' else 'لمس أعمى (بدون فلتر)'
-    return (f"📐 <b>سلّم جان (المروحة) — دورة جديدة</b>\n"
-            f"إغلاق {_anchor_label()}: <b>{close:.2f}</b>\n\n"
-            f"مدة المراقبة: {sym_state['gann_cycle_hours']}س  |  فلتر: {filt}\nالدخول: {mode}\n\n\n"
-            + '\n'.join(lines))
 
 _consecutive_real_order_failures = 0
 _REAL_ORDER_FAILURE_HALT_THRESHOLD = 3
@@ -1434,7 +1263,7 @@ async def _execute_smart_order(symbol: str, is_buy: bool, lot: float,
                                 level_price: float, sl: float, tp: float,
                                 t1_signal_ts: float,
                                 max_slippage_points: int) -> dict:
-    """Zero-slippage execution for Gann level touch trading.
+    """Zero-slippage execution for the EMA/Stochastic strategy's candle-close signals.
 
     Phase 1 — LIMIT (GTD 30s + cancel-on-move) with smart spread-aware placement.
       Smart limit price = level_price ± spread/2 to capture midpoint fills.
@@ -1511,12 +1340,16 @@ async def _execute_smart_order(symbol: str, is_buy: bool, lot: float,
             ioc_fail_reason = 'Skipped — level below market for sell limit'
             raise _SkipLimitPhase(ioc_fail_reason)
 
-    margin = bot_state['symbol_state'][symbol]['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
+    # No more "level" concept to measure a touch-margin against -- reuse
+    # the caller's own max_slippage_points budget (already in broker points)
+    # as the basis for how far price is allowed to run before this pending
+    # limit order cancels itself.
+    margin = max_slippage_points * SYMBOL_INFO[symbol]['pip_value']
     cancel_threshold = margin * 2  # cancel if price moves 2×margin away
 
     limit_opts = {
         'slippage': max_slippage_points,
-        'comment': 'limit_buy_gann' if is_buy else 'limit_sell_gann',
+        'comment': 'limit_buy_strategy' if is_buy else 'limit_sell_strategy',
         'expirationType': 'ORDER_TIME_SPECIFIED',
         'expiration': datetime.utcnow() + timedelta(seconds=30),  # Extended GTD
     }
@@ -1679,10 +1512,17 @@ async def _execute_smart_order(symbol: str, is_buy: bool, lot: float,
         }
 
 
-async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list, reason: str, tf: str,
-                            initial_px: float = None, detect_time: datetime = None, t1_signal_ts: float = None,
-                            feed_source: str = None, feed_age_ms: float = None, trigger_type: str = None,
-                            combo_key: str = None) -> None:
+async def _strategy_open_trade(symbol: str, is_buy: bool, signal_price: float, candles: list, reason: str, tf: str,
+                            detect_time: datetime = None, t1_signal_ts: float = None,
+                            feed_source: str = None, feed_age_ms: float = None) -> None:
+    """Open a new trade off an EMA-stack + Stochastic-crossover signal
+    detected on candle close. `signal_price` is the close of the signal
+    candle at the moment the signal was detected -- used only as the
+    reference price for the smart-limit execution helper and for
+    slippage/report labeling (kept under the historical dict key
+    'level_price' so existing export/report code keeps working
+    unmodified); it is NOT a Gann level and nothing here waits for price
+    to "touch" it."""
     global _consecutive_real_order_failures
     sym_state = bot_state['symbol_state'][symbol]
 
@@ -1699,60 +1539,27 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         return
 
     try:
-        _lk = combo_key or level['key']
         is_real = sym_state.get('auto_trade', False)
 
         # ── Re-verify price at execution time (Point 3) ──
-        # For real trades, fetch a fresh price right before execution to
-        # confirm the level is still valid. Simulated trades skip this
-        # since they don't interact with the broker.
-        fresh_px, fresh_feed_source, fresh_feed_age_ms = initial_px, 'ws', feed_age_ms
+        # For real trades, fetch a fresh price right before execution.
+        # Simulated trades skip this since they don't interact with the
+        # broker and the signal candle's close is already the reference.
+        fresh_px, fresh_feed_source, fresh_feed_age_ms = signal_price, (feed_source or 'oanda'), feed_age_ms
         if is_real:
             fresh_px, fresh_feed_source, fresh_feed_age_ms = await _lq_price_with_fallback(symbol)
-        margin = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
         if fresh_px is None:
-            # WS feed stale — reject trade rather than fall back to slow OANDA REST
-            bot_state['symbol_state'][symbol]['gann_level_status'][_lk] = 'used'
             c_log(f"REJECTED [{symbol} {tf}]: WS feed stale ({_QUOTE_STALE_SECONDS}s), "
                   f"trade aborted to avoid {50}-{150}ms REST latency")
             await send_tg_msg(
-                f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
-                f"المستوى: {level['price']:.2f}\n"
-                f"تم رفض الصفقة — تغذية السعر غير محدثة (أكبر من {_QUOTE_STALE_SECONDS}ث).\n"
-                f"السبب: تجنب استدعاء OANDA REST البطيء ({50}-{150}ms) الذي يفسد السكالبينج."
-            )
-            return
-        if abs(fresh_px - level['price']) > margin:
-            bot_state['symbol_state'][symbol]['gann_level_status'][_lk] = 'used'
-            # Detail requested: exactly how much the price moved, over how
-            # long, and what the pre-existing code threshold is (the touch
-            # margin, gann_touch_margin_pts -- unchanged, no new number
-            # invented) that this movement exceeded.
-            elapsed_s = (datetime.now(timezone.utc) - detect_time).total_seconds() if detect_time else None
-            drift = abs(fresh_px - initial_px) if (fresh_px is not None and initial_px is not None) else None
-            detail_lines = []
-            if drift is not None:
-                margin_pts = sym_state['gann_touch_margin_pts']
-                detail_lines.append(
-                    f"الحركة الفعلية منذ اكتشاف اللمس: {drift:.3f} ({drift / SYMBOL_INFO[symbol]['pip_value']:.1f} نقطة)"
-                )
-                detail_lines.append(
-                    f"الحد المسموح به مسبقاً بالكود (هامش اللمس gann_touch_margin_pts): {margin_pts} نقطة ({margin:.3f})"
-                )
-            if elapsed_s is not None:
-                detail_lines.append(f"الفجوة الزمنية بين الاكتشاف والتنفيذ: {elapsed_s:.1f} ثانية")
-            detail_block = ("\n" + "\n".join(detail_lines)) if detail_lines else ""
-            await send_tg_msg(
-                f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
-                f"المستوى: {level['price']:.2f}\n"
-                f"تم تجاهل الفريم — السعر ابتعد عن المستوى أثناء التنفيذ "
-                f"({'لا يمكن التأكد من السعر الحالي' if fresh_px is None else f'{fresh_px:.2f}'}) ولم يعد لمساً حقيقياً."
-                f"{detail_block}"
+                f"<b>⏭️ [{symbol} - {tf}]</b>  {reason}\n"
+                f"إغلاق شمعة الإشارة: {signal_price:.2f}\n"
+                f"تم رفض الصفقة — تغذية السعر غير محدثة (أكبر من {_QUOTE_STALE_SECONDS}ث)."
             )
             return
 
         price = fresh_px
-        tp, sl = _gann_calc_tpsl(symbol, price, is_buy, candles, tf=tf)
+        tp, sl = _strategy_calc_tpsl(symbol, price, is_buy, candles, tf=tf)
 
         # ── Pre-send sanity check (Point 4) ──
         # If price already moved past where TP or SL would sit before we
@@ -1760,29 +1567,27 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         # nonsensical/rejected stops, e.g. "Invalid stops"). Better to skip
         # cleanly here than let the broker reject it after the fact.
         if is_buy and (price >= tp or price <= sl):
-            bot_state['symbol_state'][symbol]['gann_level_status'][_lk] = 'used'
             await send_tg_msg(
-                f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
-                f"المستوى: {level['price']:.2f}\n"
+                f"<b>⏭️ [{symbol} - {tf}]</b>  {reason}\n"
+                f"إغلاق شمعة الإشارة: {signal_price:.2f}\n"
                 f"تم إلغاء الأمر قبل الإرسال — السعر الحالي ({price:.2f}) تجاوز فعلياً "
                 f"مستوى TP/SL المحسوب (TP:{tp} SL:{sl})."
             )
             return
         if not is_buy and (price <= tp or price >= sl):
-            bot_state['symbol_state'][symbol]['gann_level_status'][_lk] = 'used'
             await send_tg_msg(
-                f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
-                f"المستوى: {level['price']:.2f}\n"
+                f"<b>⏭️ [{symbol} - {tf}]</b>  {reason}\n"
+                f"إغلاق شمعة الإشارة: {signal_price:.2f}\n"
                 f"تم إلغاء الأمر قبل الإرسال — السعر الحالي ({price:.2f}) تجاوز فعلياً "
                 f"مستوى TP/SL المحسوب (TP:{tp} SL:{sl})."
             )
             return
 
         lot = sym_state['lot_size']
-        tp_pts = _gann_tf_tp(symbol, tf); sl_pts = _gann_tf_sl(symbol, tf)
+        tp_pts = _strategy_tf_tp(symbol, tf); sl_pts = _strategy_tf_sl(symbol, tf)
 
-        tpsl_lbl = (f"ATR({sym_state['gann_atr_period']})×{sym_state['gann_atr_sl_mult']}/{sym_state['gann_atr_tp_mult']}\n"
-                    if sym_state['gann_tpsl_mode'] == 'atr' else f"SL:{sl_pts}p TP:{tp_pts}p")
+        tpsl_lbl = (f"ATR({sym_state['strategy_atr_period']})×{sym_state['strategy_atr_sl_mult']}/{sym_state['strategy_atr_tp_mult']}\n"
+                    if sym_state['strategy_tpsl_mode'] == 'atr' else f"SL:{sl_pts}p TP:{tp_pts}p")
 
         be_lbl = " | 🛡️ BE Active" if sym_state['break_even_enabled'] else ""
 
@@ -1795,6 +1600,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         # simulated/paper trades, where `price` IS the fill by definition.
         real_fill_price = None
         fill_price_source = 'simulated'
+        exec_result = None
 
         if is_real:
             # Source of truth: never spin up a second, ad-hoc MetaAPI
@@ -1809,7 +1615,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                 broker_symbol = _resolve_broker_symbol(symbol)
                 max_slippage_points = int(bot_state.get('prot_max_slippage_points', 5))
                 exec_result = await _execute_smart_order(
-                    symbol, is_buy, lot, level['price'],
+                    symbol, is_buy, lot, price,
                     sl, tp, t1_signal_ts, max_slippage_points,
                 )
 
@@ -1820,14 +1626,14 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
 
                     feed_label = 'WS (MetaApi live)' if fresh_feed_source == 'ws' else 'OANDA REST (fallback)'
                     age_str = f"{fresh_feed_age_ms}ms" if fresh_feed_age_ms is not None else 'n/a'
-                    method_labels = {'limit': 'حدّي بسعر المستوى (Limit/IOC)',
+                    method_labels = {'limit': 'حدّي بسعر الإشارة (Limit/IOC)',
                                      'market_fallback': 'سوقي بحماية الانزلاق (Market/FOK)'}
                     method_label = method_labels.get(exec_result['method_used'], 'غير معروف')
                     slippage_str = ''
-                    if real_fill_price is not None and level['price'] is not None:
-                        slip = abs(real_fill_price - level['price'])
+                    if real_fill_price is not None and price is not None:
+                        slip = abs(real_fill_price - price)
                         slippage_str = (
-                            f"\n📊 الانزلاق الفعلي عن المستوى: {slip:.2f} "
+                            f"\n📊 الانزلاق الفعلي عن سعر الإشارة: {slip:.2f} "
                             f"({slip / SYMBOL_INFO[symbol]['pip_value']:.1f} نقطة)"
                         )
                     real_msg = (
@@ -1864,17 +1670,16 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                         )
 
         # Ghost-trade fix: a FAILED real-order attempt must never enter
-        # gann_open_trades -- it never had any exposure on the broker, so
+        # strategy_open_trades -- it never had any exposure on the broker, so
         # tracking it (even as a "simulated" fallback) meant the bot would
         # later evaluate it against live price movement and report a
         # fabricated WIN/LOSS for a trade that never existed. Genuine
         # paper-trading (auto_trade was never enabled to begin with) is a
         # completely different, intentional case and is still tracked.
         if execution_failed:
-            bot_state['symbol_state'][symbol]['gann_level_status'][_lk] = 'used'
             await send_tg_msg(
-                f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
-                f"المستوى: {level['price']:.2f}\n"
+                f"<b>⏭️ [{symbol} - {tf}]</b>  {reason}\n"
+                f"إغلاق شمعة الإشارة: {signal_price:.2f}\n"
                 f"{real_msg}"
             )
             return
@@ -1884,19 +1689,18 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         # trades, or a real trade where the position lookup above failed).
         entry_final = real_fill_price if real_fill_price is not None else price
 
-        exec_latency = exec_result.get('latency_ms') if is_real else None
-        exec_method = exec_result.get('method_used') if is_real else None
-        exec_ioc_fail = exec_result.get('ioc_fail_reason') if is_real else None
-        exec_slippage = round(abs(entry_final - level['price']), 5) if entry_final is not None and level['price'] is not None else None
+        exec_latency = exec_result.get('latency_ms') if (is_real and exec_result) else None
+        exec_method = exec_result.get('method_used') if (is_real and exec_result) else None
+        exec_ioc_fail = exec_result.get('ioc_fail_reason') if (is_real and exec_result) else None
+        exec_slippage = round(abs(entry_final - price), 5) if entry_final is not None and price is not None else None
 
-        bot_state['symbol_state'][symbol]['gann_open_trades'][trade_id] = {
+        bot_state['symbol_state'][symbol]['strategy_open_trades'][trade_id] = {
             'tf': tf, 'is_buy': is_buy, 'entry': entry_final, 'is_real': is_real, 'sl': sl, 'tp': tp,
-            'opened_at': datetime.now(timezone.utc).isoformat(), 'level_price': level['price'],
-            'feed_source': feed_source, 'feed_age_ms': feed_age_ms, 'trigger_type': trigger_type,
+            'opened_at': datetime.now(timezone.utc).isoformat(), 'level_price': price,
+            'feed_source': feed_source, 'feed_age_ms': feed_age_ms, 'trigger_type': 'candle_close',
             'exec_latency_ms': exec_latency, 'exec_method': exec_method,
             'exec_ioc_fail_reason': exec_ioc_fail, 'exec_slippage': exec_slippage,
         }
-        bot_state['symbol_state'][symbol]['gann_level_status'][_lk] = 'used'
         await _debounced_persist_save()
 
         entry_note = {
@@ -1906,25 +1710,21 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         }.get(fill_price_source, ' (تقديري قبل التنفيذ — تعذّر تأكيد سعر الوسيط)')
         slippage_line = ""
         if is_real and entry_final is not None:
-            actual_slippage = abs(entry_final - level['price'])
+            actual_slippage = abs(entry_final - price)
             pv = SYMBOL_INFO[symbol]['pip_value']
-            slippage_line = f"الانزلاق الفعلي عن المستوى: {actual_slippage:.2f} ({actual_slippage / pv:.1f} نقطة)\n"
-
-        close_used = bot_state['symbol_state'][symbol].get('gann_close_used')
-        close_label = f'{close_used:.5f}' if close_used is not None else '-'
+            slippage_line = f"الانزلاق الفعلي عن سعر الإشارة: {actual_slippage:.2f} ({actual_slippage / pv:.1f} نقطة)\n"
 
         await send_tg_msg(
             f"<b>✅ {reason}</b>\n\n"
-            f"المستوى: {level['price']:.2f}  |  الدخول: {entry_final:.2f}{entry_note}\n\n"
+            f"إغلاق شمعة الإشارة: {signal_price:.2f}  |  الدخول: {entry_final:.2f}{entry_note}\n\n"
             f"TP: {tp}  SL: {sl}  |  {tpsl_lbl}{be_lbl}\n"
             f"{slippage_line}"
-            f"إغلاق {_anchor_label()}: {close_label}\n"
             f"{real_msg}"
         )
     except Exception as e:
-        log_exception(f"_gann_open_trade [{symbol} {tf}]", e)
-        bot_state['symbol_state'][symbol]['gann_level_status'][_lk] = 'used'
-        await send_tg_msg(f"<b>❌ فشل تنفيذ الصفقة [{symbol} - جان {tf}]</b>\nالمستوى: {level['price']:.5f}\n{e}")
+        log_exception(f"_strategy_open_trade [{symbol} {tf}]", e)
+        await send_tg_msg(f"<b>❌ فشل تنفيذ الصفقة [{symbol} - {tf}]</b>\nإغلاق شمعة الإشارة: {signal_price:.5f}\n{e}")
+
 
 # ─────────────────────────────────────────────────────────────
 # BACKTEST PROGRESS TRACKER
@@ -2008,10 +1808,10 @@ def get_main_keyboard() -> dict:
         [{'text': '📒 تصدير سجل الصفقات الحية (Excel)', 'callback_data': 'export_live_trades_excel'}],
         [{'text': '📋 تقرير تفاصيل التنفيذ (Latency/Method/Slippage)', 'callback_data': 'export_exec_report'}],
         [{'text': '🔓 استئناف يدوي بعد HALT (بعد التأكد من الحساب)', 'callback_data': 'manual_resume_step1'}],
-        [{'text': '📐 محرك جان (الاستراتيجية)', 'callback_data': 'menu_gann'}],
+        [{'text': '📈 محرك الاستراتيجية (EMA/Stochastic)', 'callback_data': 'menu_strategy'}],
         [{'text': '🛡️ إعدادات الحماية', 'callback_data': 'menu_protection'}],
         [{'text': '💾 إدارة الإعدادات (Presets)', 'callback_data': 'menu_presets'}],
-        [{'text': '📊 بدء الباكتيست', 'callback_data': 'menu_gann_bt'}],
+        [{'text': '📊 بدء الباكتيست', 'callback_data': 'menu_strategy_bt'}],
         [{'text': '🧪 Live-Twin Simulator (تنفيذ واقعي)', 'callback_data': 'menu_lt'}],
     ]}
 
@@ -2035,69 +1835,49 @@ def get_protection_keyboard() -> dict:
         ],
         [{'text': '── الحماية المتقدمة (v9.0) ──', 'callback_data': 'noop'}],
         [{'text': f"مزامنة MT4 (Reconciliation): {'✅' if bot_state.get('prot_true_sync', True) else '🔴'}", 'callback_data': 'tg_prot_sync'}],
-        [{'text': f"إلغاء الدورة وقت الانفجار: {'✅' if bot_state.get('prot_cycle_inval', True) else '🔴'}", 'callback_data': 'tg_prot_inval'}],
         [{'text': f"BE شامل التكلفة (True Cost): {'✅' if bot_state.get('prot_cost_be', True) else '🔴'}", 'callback_data': 'tg_prot_cost'}],
         [{'text': f"فلتر البيانات المتأخرة: {'✅' if bot_state.get('prot_stale_filter', True) else '🔴'}", 'callback_data': 'tg_prot_stale'}],
-        [{'text': f"إطار مرجعي للجان (Anchor): {bot_state.get('gann_anchor_tf', '1h').upper()}", 'callback_data': 'tg_prot_anchor'}],
         [{'text': f"فلتر أوقات دمشق (07-09 | 13-14): {'✅' if bot_state.get('prot_dam_time_filter', True) else '🔴'}", 'callback_data': 'tg_prot_dam_time'}],
-        [{'text': f"حساب جان: {'⚡ حي (كل 5 دقائق)' if bot_state.get('gann_calculation_mode', 'static_h1') == 'dynamic_live' else '📌 كلاسيكي (H1/H4)'}", 'callback_data': 'tg_gann_calc_mode'}],
         [{'text': f'تكرار الصفقات (Multi-TF): {multi_tf}', 'callback_data': 'prot_toggle_multitf'}],
         [{'text': '── ── ──', 'callback_data': 'noop'}],
         [{'text': '🔄 تصفير كل الحمايات النشطة الآن', 'callback_data': 'prot_reset_all'}],
         [{'text': '🔙 رجوع للقائمة الرئيسية', 'callback_data': 'menu_main'}],
-        [{'text': '🔙 رجوع لإعدادات جان', 'callback_data': 'menu_gann'}]
+        [{'text': '🔙 رجوع لإعدادات الاستراتيجية', 'callback_data': 'menu_strategy'}]
     ]
     return {'inline_keyboard': rows}
 
-def get_gann_keyboard() -> dict:
+def get_strategy_keyboard() -> dict:
     sym = bot_state['ui_selected_symbol']
     sym_state = bot_state['symbol_state'][sym]
-    zf   = sym_state['gann_zone_filter']
-    em   = sym_state['gann_entry_mode']
-    mg   = sym_state['gann_touch_margin_pts']
-    tpsm = sym_state['gann_tpsl_mode']
-    hrs  = sym_state['gann_cycle_hours']
-    cyc  = '🟢 نشطة' if sym_state['gann_cycle_active'] else '⚫ غير نشطة'
-    open_n = len(bot_state['symbol_state'][sym]['gann_open_trades'])
-    
-    flt_type = sym_state['trend_filter_type']
-    
-    # تحديث التسميات لزر الفلتر
-    if zf == 'star': zf_lbl = '⭐ المستويات الأصلية القوية فقط'
-    elif zf == 'star_fan': zf_lbl = '⭐🌀 القوية + موازية للمروحة'
-    else: zf_lbl = '📋 كل المستويات (للتجارب)'
-    
-    if flt_type == 'ema':
-        filt_btn_lbl = "📉 الفلتر المعتمد: (EMA الشامل)"
-        flt_name = 'EMA'
-    else:
-        filt_btn_lbl = "🌊 الفلتر المعتمد: (VWAP الشامل)"
-        flt_name = 'VWAP'
-        
-    ttf_lbl = sym_state['trend_timeframe'].upper()
-    em_lbl  = f'⚡ لمس + فلتر ({flt_name}_{ttf_lbl})' if em == 'touch_trend' else '⚡ لمس أعمى (بدون فلتر)'
+    tpsm = sym_state['strategy_tpsl_mode']
+    open_n = len(sym_state['strategy_open_trades'])
+
     tps_lbl = f'🎯 TP/SL: {"نقاط ثابتة" if tpsm == "fixed" else "حسب ATR"}'
 
-    tp = sym_state['gann_tp_points']; sl = sym_state['gann_sl_points']
-    atp = sym_state['gann_atr_tp_mult']; asp = sym_state['gann_atr_sl_mult']
-    ap  = sym_state['gann_atr_period']
+    tp = sym_state['strategy_tp_points']; sl = sym_state['strategy_sl_points']
+    atp = sym_state['strategy_atr_tp_mult']; asp = sym_state['strategy_atr_sl_mult']
+    ap  = sym_state['strategy_atr_period']
     be_lbl = "🟢 مفعل" if sym_state['break_even_enabled'] else "⚫ معطل"
-    
+
     auto_t = '🟢 مفعل' if sym_state.get('auto_trade', False) else '🔴 معطل'
-    
+
+    shift = bot_state.get('signal_candle_shift', 1)
+    shift_lbl = {0: 'الشمعة الحية (0)', 1: 'آخر شمعة مغلقة (1)', 2: 'ما قبل الأخيرة (2)'}.get(shift, str(shift))
+    concur = '✅ مسموح' if bot_state.get('allow_concurrent_trades', False) else '❌ ممنوع'
+
     rows = [
-        [{'text': f'🤖 التداول الآلي (MetaAPI): {auto_t}', 'callback_data': 'gann_toggle_auto_trade'}],
+        [{'text': f'🤖 التداول الآلي (MetaAPI): {auto_t}', 'callback_data': 'strategy_toggle_auto_trade'}],
         [{'text': '🛡️ إعدادات الحماية المتقدمة', 'callback_data': 'menu_protection'}],
-        [{'text': f'📐 {sym} — دورة: {cyc}  |  صفقات: {open_n}', 'callback_data': 'noop'}],
-        [{'text': '🔄 عرض الدعوم والمقاومات الحالية', 'callback_data': 'gann_show_levels'}],
-        [{'text': '🕯️ تشخيص: آخر 10 شموع (وقت + إغلاق)', 'callback_data': 'gann_show_last10'}],
+        [{'text': f'📈 {sym} — صفقات مفتوحة: {open_n}', 'callback_data': 'noop'}],
+        [{'text': '📉 عرض قيم EMA/Stochastic الحالية', 'callback_data': 'strategy_show_indicators'}],
+        [{'text': '🕯️ تشخيص: آخر 10 شموع (وقت + إغلاق)', 'callback_data': 'strategy_show_last10'}],
     ]
-    
+
     rows.append([{'text': '── أزواج التداول والباكتيست ──', 'callback_data': 'noop'}])
     pair_row = []
     for p in AVAILABLE_SYMBOLS:
         icon = '✅' if bot_state['active_symbols'][p] else '⬜'
-        pair_row.append({'text': f'{icon} {p}', 'callback_data': f'gann_toggle_pair_{p}'})
+        pair_row.append({'text': f'{icon} {p}', 'callback_data': f'strategy_toggle_pair_{p}'})
         if len(pair_row) == 2:
             rows.append(pair_row)
             pair_row = []
@@ -2107,113 +1887,87 @@ def get_gann_keyboard() -> dict:
     sel_row = []
     for p in AVAILABLE_SYMBOLS:
         sel = '📌 ' if p == sym else ''
-        sel_row.append({'text': f'{sel}{p}', 'callback_data': f'gann_sel_pair_{p}'})
+        sel_row.append({'text': f'{sel}{p}', 'callback_data': f'strategy_sel_pair_{p}'})
         if len(sel_row) == 2:
             rows.append(sel_row)
             sel_row = []
     if sel_row: rows.append(sel_row)
-    
-    exec_mode = bot_state.get('gann_execution_mode', 'instant')
-    exec_lbl = {
-        'instant': '⚡ دخول لمس مباشر (Instant)',
-        'close':   '⏳ انتظار إغلاق الشمعة (Close)',
-        'hybrid':  '🛡️ مباشر هجين (Hybrid Spike-Limit)',
-        'all_concurrent': '🔀 الثلاثة معاً (All-Concurrent — اختبار مقارن)',
-    }.get(exec_mode, '⚡ دخول لمس مباشر (Instant)')
 
     rows += [
-        [{'text': '── الاستراتيجية والفلتر ──', 'callback_data': 'noop'}],
-        [{'text': f'الاستراتيجية: {em_lbl}', 'callback_data': 'gann_toggle_entry'}],
-        [{'text': f'وضع التنفيذ: {exec_lbl}', 'callback_data': 'gann_toggle_exec_mode'}],
-        [{'text': f'فلتر الدخول: {zf_lbl}', 'callback_data': 'gann_toggle_filter'}],
-        [{'text': filt_btn_lbl, 'callback_data': 'gann_toggle_filter_type'}],
-        [{'text': f'⏱️ فريم الترند: {ttf_lbl}', 'callback_data': 'gann_toggle_ttf'}],
-        [{'text': f'🛡️ صمام الأمان (Break-Even): {be_lbl}', 'callback_data': 'gann_toggle_be'}],
+        [{'text': '── الاستراتيجية (EMA 15/50/150 + Stoch 5/5/5) ──', 'callback_data': 'noop'}],
+        [{'text': f'شمعة التقييم: {shift_lbl}', 'callback_data': 'strategy_toggle_candle_shift'}],
+        [{'text': f'السماح بصفقات متزامنة (نفس الاتجاه): {concur}', 'callback_data': 'strategy_toggle_concurrent'}],
+        [{'text': f'🛡️ صمام الأمان (Break-Even): {be_lbl}', 'callback_data': 'strategy_toggle_be'}],
     ]
     if sym_state.get('break_even_enabled', False):
-        be_pts = sym_state.get('gann_be_trigger_points', 40)
+        be_pts = sym_state.get('strategy_be_trigger_points', 40)
         rows.append([
-            {'text': 'BE −10p', 'callback_data': 'gann_dec_be_pts'}, 
-            {'text': f'تفعيل بعد: {be_pts}p', 'callback_data': 'noop'}, 
-            {'text': 'BE +10p', 'callback_data': 'gann_inc_be_pts'}
+            {'text': 'BE −10p', 'callback_data': 'strategy_dec_be_pts'},
+            {'text': f'تفعيل بعد: {be_pts}p', 'callback_data': 'noop'},
+            {'text': 'BE +10p', 'callback_data': 'strategy_inc_be_pts'}
         ])
-    
-    if flt_type == 'vwap':
-        vwap_val = sym_state['trend_vwap_period']
-        rows.append([{'text': 'VWAP −10', 'callback_data': 'gann_dec_vwap'}, 
-                     {'text': f'قيمة {ttf_lbl} VWAP: {vwap_val}', 'callback_data': 'noop'}, 
-                     {'text': 'VWAP +10', 'callback_data': 'gann_inc_vwap'}])
-                     
-    if flt_type == 'ema':
-        ema_val = sym_state['trend_ema_period']
-        rows.append([{'text': 'EMA −10', 'callback_data': 'gann_dec_ema'}, 
-                     {'text': f'قيمة {ttf_lbl} EMA: {ema_val}', 'callback_data': 'noop'}, 
-                     {'text': 'EMA +10', 'callback_data': 'gann_inc_ema'}])
-        
+
     rows += [
-        [{'text': '📝 مساعدة: تغيير القيم الخاصة بالأوامر', 'callback_data': 'gann_filter_help'}],
-        [{'text': '── فريمات التنفيذ ──', 'callback_data': 'noop'}],
+        [{'text': '── فريمات التنفيذ (تقييم عند إغلاق كل شمعة) ──', 'callback_data': 'noop'}],
     ]
-    
-    tf_items = list(sym_state['gann_monitor_tfs'].items())
+
+    tf_items = list(sym_state['strategy_monitor_tfs'].items())
     for i in range(0, len(tf_items), 4):
-        rows.append([{'text': ('✅' if on else '⬜') + f' {tfk}', 'callback_data': f'gann_tf_{tfk}'} for tfk, on in tf_items[i:i+4]])
-        
+        rows.append([{'text': ('✅' if on else '⬜') + f' {tfk}', 'callback_data': f'strategy_tf_{tfk}'} for tfk, on in tf_items[i:i+4]])
+
     rows += [
         [{'text': '── إعدادات عامة ──', 'callback_data': 'noop'}],
-        [{'text': '−ساعة', 'callback_data': 'gann_dec_hours'}, {'text': f'مدة تجميد السلّم: {hrs} ساعة', 'callback_data': 'noop'}, {'text': '+ساعة', 'callback_data': 'gann_inc_hours'}],
-        [{'text': 'Lot −0.01', 'callback_data': 'gann_dec_lot'}, {'text': f'حجم اللوت: {sym_state["lot_size"]}', 'callback_data': 'noop'}, {'text': 'Lot +0.01', 'callback_data': 'gann_inc_lot'}],
-        [{'text': 'Margin −1', 'callback_data': 'gann_dec_margin'}, {'text': f'هامش اللمس {mg}p', 'callback_data': 'noop'}, {'text': 'Margin +1', 'callback_data': 'gann_inc_margin'}],
+        [{'text': 'Lot −0.01', 'callback_data': 'strategy_dec_lot'}, {'text': f'حجم اللوت: {sym_state["lot_size"]}', 'callback_data': 'noop'}, {'text': 'Lot +0.01', 'callback_data': 'strategy_inc_lot'}],
         [{'text': '── TP / SL ──', 'callback_data': 'noop'}],
-        [{'text': tps_lbl, 'callback_data': 'gann_toggle_tpsl'}],
+        [{'text': tps_lbl, 'callback_data': 'strategy_toggle_tpsl'}],
     ]
 
     if tpsm == 'fixed':
         rows += [
-            [{'text': 'TP  −10', 'callback_data': 'gann_dec_tp10'}, {'text': f'TP={tp}p', 'callback_data': 'noop'}, {'text': 'TP  +10', 'callback_data': 'gann_inc_tp10'}],
-            [{'text': 'SL  −10', 'callback_data': 'gann_dec_sl10'}, {'text': f'SL={sl}p', 'callback_data': 'noop'}, {'text': 'SL  +10', 'callback_data': 'gann_inc_sl10'}],
+            [{'text': 'TP  −10', 'callback_data': 'strategy_dec_tp10'}, {'text': f'TP={tp}p', 'callback_data': 'noop'}, {'text': 'TP  +10', 'callback_data': 'strategy_inc_tp10'}],
+            [{'text': 'SL  −10', 'callback_data': 'strategy_dec_sl10'}, {'text': f'SL={sl}p', 'callback_data': 'noop'}, {'text': 'SL  +10', 'callback_data': 'strategy_inc_sl10'}],
         ]
     else:
         rows += [
-            [{'text': 'ATR Period −', 'callback_data': 'gann_dec_atrp'}, {'text': f'Period={ap}', 'callback_data': 'noop'}, {'text': 'ATR Period +', 'callback_data': 'gann_inc_atrp'}],
-            [{'text': 'SL mult −0.5', 'callback_data': 'gann_dec_atrsl'}, {'text': f'SL×{asp}', 'callback_data': 'noop'}, {'text': 'SL mult +0.5', 'callback_data': 'gann_inc_atrsl'}],
-            [{'text': 'TP mult −0.5', 'callback_data': 'gann_dec_atrtp'}, {'text': f'TP×{atp}', 'callback_data': 'noop'}, {'text': 'TP mult +0.5', 'callback_data': 'gann_inc_atrtp'}],
+            [{'text': 'ATR Period −', 'callback_data': 'strategy_dec_atrp'}, {'text': f'Period={ap}', 'callback_data': 'noop'}, {'text': 'ATR Period +', 'callback_data': 'strategy_inc_atrp'}],
+            [{'text': 'SL mult −0.5', 'callback_data': 'strategy_dec_atrsl'}, {'text': f'SL×{asp}', 'callback_data': 'noop'}, {'text': 'SL mult +0.5', 'callback_data': 'strategy_inc_atrsl'}],
+            [{'text': 'TP mult −0.5', 'callback_data': 'strategy_dec_atrtp'}, {'text': f'TP×{atp}', 'callback_data': 'noop'}, {'text': 'TP mult +0.5', 'callback_data': 'strategy_inc_atrtp'}],
         ]
 
     rows += [
-        [{'text': '⚙️ TP/SL مخصص لكل فريم', 'callback_data': 'gann_tpsl_tf'}],
-        [{'text': '📊 بدء الباكتيست', 'callback_data': 'menu_gann_bt'}],
+        [{'text': '⚙️ TP/SL مخصص لكل فريم', 'callback_data': 'strategy_tpsl_tf'}],
+        [{'text': '📊 بدء الباكتيست', 'callback_data': 'menu_strategy_bt'}],
         [{'text': '← رجوع', 'callback_data': 'menu_main'}],
     ]
     return {'inline_keyboard': rows}
 
-def get_gann_tpsl_tf_keyboard(sel_tf: str = '') -> dict:
+def get_strategy_tpsl_tf_keyboard(sel_tf: str = '') -> dict:
     sym_state = bot_state['symbol_state'][bot_state['ui_selected_symbol']]
     rows = [[{'text': '⚙️ TP/SL مخصص لكل فريم', 'callback_data': 'noop'}],
             [{'text': '(0 = يرجع للقيمة العامة)', 'callback_data': 'noop'}]]
-    tfs_list = list(sym_state['gann_monitor_tfs'].keys())
+    tfs_list = list(sym_state['strategy_monitor_tfs'].keys())
     tf_row = []
     for tfk in tfs_list:
         icon = '👉' if tfk == sel_tf else ''
-        tf_row.append({'text': f'{icon}{tfk}', 'callback_data': f'gann_tptf_sel_{tfk}'})
+        tf_row.append({'text': f'{icon}{tfk}', 'callback_data': f'strategy_tptf_sel_{tfk}'})
         if len(tf_row) == 4: rows.append(tf_row); tf_row = []
     if tf_row: rows.append(tf_row)
     if sel_tf:
-        tp_v = sym_state['gann_tp_per_tf'].get(sel_tf, 0); sl_v = sym_state['gann_sl_per_tf'].get(sel_tf, 0)
-        eff_tp = tp_v if tp_v > 0 else sym_state['gann_tp_points']
-        eff_sl = sl_v if sl_v > 0 else sym_state['gann_sl_points']
+        tp_v = sym_state['strategy_tp_per_tf'].get(sel_tf, 0); sl_v = sym_state['strategy_sl_per_tf'].get(sel_tf, 0)
+        eff_tp = tp_v if tp_v > 0 else sym_state['strategy_tp_points']
+        eff_sl = sl_v if sl_v > 0 else sym_state['strategy_sl_points']
         rows += [
             [{'text': f'── [{sel_tf}] ──', 'callback_data': 'noop'}],
             [{'text': f'TP فعلي: {eff_tp}p {"(مخصص)" if tp_v>0 else "(عام)"}', 'callback_data': 'noop'}],
-            [{'text': 'TP −10', 'callback_data': f'gann_tptf_dtp_{sel_tf}'}, {'text': f'TP={tp_v}', 'callback_data': 'noop'}, {'text': 'TP +10', 'callback_data': f'gann_tptf_itp_{sel_tf}'}],
+            [{'text': 'TP −10', 'callback_data': f'strategy_tptf_dtp_{sel_tf}'}, {'text': f'TP={tp_v}', 'callback_data': 'noop'}, {'text': 'TP +10', 'callback_data': f'strategy_tptf_itp_{sel_tf}'}],
             [{'text': f'SL فعلي: {eff_sl}p {"(مخصص)" if sl_v>0 else "(عام)"}', 'callback_data': 'noop'}],
-            [{'text': 'SL −10', 'callback_data': f'gann_tptf_dsl_{sel_tf}'}, {'text': f'SL={sl_v}', 'callback_data': 'noop'}, {'text': 'SL +10', 'callback_data': f'gann_tptf_isl_{sel_tf}'}],
-            [{'text': '↺ إعادة ضبط', 'callback_data': f'gann_tptf_rst_{sel_tf}'}],
+            [{'text': 'SL −10', 'callback_data': f'strategy_tptf_dsl_{sel_tf}'}, {'text': f'SL={sl_v}', 'callback_data': 'noop'}, {'text': 'SL +10', 'callback_data': f'strategy_tptf_isl_{sel_tf}'}],
+            [{'text': '↺ إعادة ضبط', 'callback_data': f'strategy_tptf_rst_{sel_tf}'}],
         ]
-    rows.append([{'text': '← رجوع', 'callback_data': 'menu_gann'}])
+    rows.append([{'text': '← رجوع', 'callback_data': 'menu_strategy'}])
     return {'inline_keyboard': rows}
 
-def get_gann_bt_keyboard() -> dict:
+def get_strategy_bt_keyboard() -> dict:
     if bot_state['is_backtesting']:
         return {'inline_keyboard': [[{'text': '⏳ الباكتيست يعمل...', 'callback_data': 'noop'}], [{'text': '⏹ إلغاء', 'callback_data': 'cancel_bt'}]]}
     return {'inline_keyboard': [
@@ -2221,11 +1975,11 @@ def get_gann_bt_keyboard() -> dict:
         [{'text': 'ثلاثة أيام', 'callback_data': 'gbt_3'}, {'text': 'أسبوع', 'callback_data': 'gbt_7'}],
         [{'text': 'شهر كامل', 'callback_data': 'gbt_30'}],
         [{'text': 'أو أرسل: /backtest YYYY-MM-DD', 'callback_data': 'noop'}],
-        [{'text': '← رجوع', 'callback_data': 'menu_gann'}],
+        [{'text': '← رجوع', 'callback_data': 'menu_strategy'}],
     ]}
 
 # ─────────────────────────────────────────────────────────────
-# LIVE SCANNER (VWAP / EMA / BOTH Macro)
+# LIVE SCANNER (EMA 15/50/150 + Stochastic 5/5/5)
 # ─────────────────────────────────────────────────────────────
 async def _close_metaapi_trade(symbol: str, tid: str, sym_state: dict) -> bool:
     """Sequential, polled closure. Caller MUST await this fully before
@@ -2244,8 +1998,8 @@ async def _close_metaapi_trade(symbol: str, tid: str, sym_state: dict) -> bool:
             positions = _metaapi_conn.terminal_state.positions
             if not any(str(p.get('id')) == str(tid) for p in positions):
                 await send_tg_msg(f"✅ <b>تم إغلاق صفقة {symbol} (حقيقية) بنجاح لحماية الحساب!</b>")
-                if tid in sym_state['gann_open_trades']:
-                    del sym_state['gann_open_trades'][tid]
+                if tid in sym_state['strategy_open_trades']:
+                    del sym_state['strategy_open_trades'][tid]
                     await save_bot_persistence()
                 return True
             await asyncio.sleep(1.0)
@@ -2282,7 +2036,7 @@ async def _close_metaapi_trades_batch(closures: list) -> None:
         pl = tr.get('last_known_pl', 0.0)
         px = tr.get('last_known_px', tr.get('entry'))
         outcome_lbl = 'ربح ✅' if pl >= 0 else 'خسارة ❌'
-        return (f"[جان {tr.get('tf')}] {'BUY 📈' if tr.get('is_buy') else 'SELL 📉'}\n"
+        return (f"[{tr.get('tf')}] {'BUY 📈' if tr.get('is_buy') else 'SELL 📉'}\n"
                 f"الدخول: {tr.get('entry')}  |  آخر سعر معروف: {px}\n"
                 f"TP: {tr.get('tp')}  SL: {tr.get('sl')}\n"
                 f"النتيجة: {outcome_lbl} ({pl}$)")
@@ -2342,8 +2096,8 @@ async def _close_metaapi_trades_batch(closures: list) -> None:
                     outcome_label=('WIN' if pl > 0 else 'LOSS' if pl < 0 else 'BREAK_EVEN'),
                     close_reason='daily_capital_protection_forced_close', pnl_confirmed=False,
                 )
-                if tid in sym_state['gann_open_trades']:
-                    del sym_state['gann_open_trades'][tid]
+                if tid in sym_state['strategy_open_trades']:
+                    del sym_state['strategy_open_trades'][tid]
                     await save_bot_persistence()
 
         if pending:
@@ -2355,8 +2109,8 @@ async def _close_metaapi_trades_batch(closures: list) -> None:
             f"⚠️ <b>لم يتم تأكيد إغلاق {symbol} ({tid}) خلال المهلة.</b> يرجى التحقق يدوياً من الحساب.\n\n{_trade_detail_line(tr)}"
         )
 
-async def gann_run_diagnostics() -> str:
-    """Walks through every gate _gann_open_trade's callers check, per
+async def strategy_run_diagnostics() -> str:
+    """Walks through every gate _strategy_open_trade's callers check, per
     active symbol, and reports the exact state of each one. Read-only --
     never opens a trade, just explains why one would or wouldn't fire
     right now."""
@@ -2391,176 +2145,71 @@ async def gann_run_diagnostics() -> str:
         sym_state = bot_state['symbol_state'][symbol]
         lines.append(f"━━━━━━━━━━━━━━\n<b>{symbol}</b>")
 
-        # ⚠️ Real entries ONLY fire from _gann_tick_fire_check, which is
-        # ONLY invoked by _GannPriceListener.on_symbol_price_updated (a
-        # MetaApi WS push). Everything else below (levels, trend, distance)
-        # can look perfectly "ready" off OANDA data while this feed is
-        # silently dead/stale -- that combination is exactly "diagnostic
-        # says ready, zero trades fire for hours" with no other symptom.
+        # Live quote feed (used only for execution-time re-verification of
+        # real trades and daily PnL tracking now -- the strategy itself
+        # fires strictly on candle close, never on a tick).
         q = live_quotes.get(symbol)
         ws_age = (time.monotonic() - q['ts']) if q else None
         if q is None:
-            lines.append("📡 تغذية MetaApi اللحظية (WS): 🛑 <b>لم تصل ولا تيك واحد بعد لهذا الرمز</b> -- "
-                          "بدون هذه التغذية لا يمكن لأي صفقة حقيقية أن تُفتح مهما كانت المستويات جاهزة.")
+            lines.append("📡 تغذية الأسعار اللحظية: 🛑 <b>لم تصل أي تحديث بعد لهذا الرمز</b> -- "
+                          "بدون هذه التغذية لا يمكن لأي صفقة حقيقية أن تُنفَّذ حتى لو ظهرت الإشارة.")
         elif ws_age > _QUOTE_STALE_SECONDS:
-            lines.append(f"📡 تغذية MetaApi اللحظية (WS): 🛑 <b>متوقفة منذ {ws_age:.0f} ثانية</b> "
+            lines.append(f"📡 تغذية الأسعار اللحظية: 🛑 <b>متوقفة منذ {ws_age:.0f} ثانية</b> "
                           f"(آخر تحديث Bid={q['bid']} Ask={q['ask']}) -- الدخول الفعلي متجمد حتى تعود.")
         else:
-            lines.append(f"📡 تغذية MetaApi اللحظية (WS): ✅ حية (عمرها {ws_age:.1f}s)")
+            lines.append(f"📡 تغذية الأسعار اللحظية: ✅ حية (عمرها {ws_age:.1f}s)")
 
-        cycle_active = sym_state.get('gann_cycle_active', False)
-        n_levels = len(sym_state.get('gann_levels', []))
-        lines.append(f"دورة جان نشطة: {'✅' if cycle_active else '🛑'}  |  عدد المستويات: {n_levels}")
-        if not cycle_active or n_levels == 0:
-            lines.append("↳ 🛑 السكانر بيتخطى هذا الرمز بالكامل (continue) لحد ما تبدأ دورة جديدة بمستويات.")
-            continue
+        shift = bot_state.get('signal_candle_shift', 1)
+        allow_concur = bot_state.get('allow_concurrent_trades', False)
+        lines.append(f"شمعة التقييم: {shift}  |  صفقات متزامنة: {'مسموح' if allow_concur else 'ممنوع'}")
 
-        flt_type = sym_state['trend_filter_type']
-        ttf = sym_state['trend_timeframe']
-        entry_mode = sym_state['gann_entry_mode']
-        lines.append(f"وضع الدخول: {entry_mode}  |  فلتر الاتجاه: {flt_type} ({ttf})")
-
-        macro_trend_up = None
-        if entry_mode == 'touch_trend':
-            p_vwap = sym_state['trend_vwap_period'] if flt_type == 'vwap' else 0
-            p_ema  = sym_state['trend_ema_period'] if flt_type == 'ema' else 0
-            max_period = max(p_vwap, p_ema, 100)
-            try:
-                trend_candles = await fetch_candles(symbol, ttf, count=max(max_period + 10, 120))
-            except Exception as e:
-                trend_candles = []
-                lines.append(f"🛑 فشل جلب بيانات الاتجاه ({ttf}): {e}")
-            if not trend_candles:
-                lines.append(f"🛑 لا توجد بيانات اتجاه ({ttf}) -- macro_trend_up سيبقى None وستُتجاهل كل الإشارات لكل الفريمات.")
-            else:
-                df_trend = pd.DataFrame(trend_candles)
-                current_trend_close = float(trend_candles[-1]['close'])
-                if flt_type == 'vwap':
-                    df_trend['Typical_Price'] = (df_trend['high'] + df_trend['low'] + df_trend['close']) / 3
-                    df_trend['VWAP'] = (df_trend['Typical_Price'] * df_trend['volume']).rolling(window=p_vwap).sum() / df_trend['volume'].rolling(window=p_vwap).sum()
-                    current_vwap = df_trend.iloc[-1]['VWAP']
-                    if pd.isna(current_vwap): current_vwap = current_trend_close
-                    macro_trend_up = current_trend_close > current_vwap
-                    lines.append(f"الاتجاه (VWAP{p_vwap}): إغلاق {current_trend_close:.2f} مقابل VWAP {current_vwap:.2f} -> {'صاعد ⬆️' if macro_trend_up else 'هابط ⬇️'}")
-                elif flt_type == 'ema':
-                    df_trend['EMA'] = df_trend['close'].ewm(span=p_ema, adjust=False).mean()
-                    current_ema = df_trend.iloc[-1]['EMA']
-                    macro_trend_up = current_trend_close > current_ema
-                    lines.append(f"الاتجاه (EMA{p_ema}): إغلاق {current_trend_close:.2f} مقابل EMA {current_ema:.2f} -> {'صاعد ⬆️' if macro_trend_up else 'هابط ⬇️'}")
-
-        levels = gann_active_levels(symbol)
-        margin = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
-        enabled_tfs = [tf for tf, on in sym_state['gann_monitor_tfs'].items() if on]
+        enabled_tfs = [tf for tf, on in sym_state['strategy_monitor_tfs'].items() if on]
         if not enabled_tfs:
-            lines.append("🛑 لا يوجد أي فريم مفعّل في gann_monitor_tfs -- لن يتم فحص أي شيء.")
+            lines.append("🛑 لا يوجد أي فريم مفعّل في strategy_monitor_tfs -- لن يتم فحص أي شيء.")
             continue
 
-        # Same single source of truth as the live scanner -- one real-time
-        # price for this symbol, reused for every timeframe line below.
-        # This report used to show a different "current price" per tf
-        # (each one its own stale candle close), which is exactly the
-        # desync users were seeing between e.g. 1m and 30m.
-        master_px = await fetch_master_price(symbol)
-        if master_px is None:
-            lines.append("🛑 بيانات غير كافية من OANDA (تعذّر جلب السعر الحالي الموحّد) -- تم تخطي كل الفريمات لهذا الرمز.")
-            continue
+        open_dirs = {v.get('is_buy') for v in sym_state['strategy_open_trades'].values() if isinstance(v, dict)}
 
         for tf in enabled_tfs:
-            already_open = any(isinstance(v, dict) and v.get('tf') == tf for v in sym_state['gann_open_trades'].values())
-            if already_open:
-                lines.append(f"[{tf}] 🛑 يوجد صفقة مفتوحة بالفعل على هذا الفريم -- لن تُفتح صفقة ثانية.")
+            already_open_tf = any(isinstance(v, dict) and v.get('tf') == tf for v in sym_state['strategy_open_trades'].values())
+            if already_open_tf:
+                lines.append(f"[{tf}] 🛑 يوجد صفقة مفتوحة بالفعل على هذا الفريم -- لن تُفتح صفقة ثانية لنفس الفريم.")
                 continue
 
             try:
-                candles = await fetch_candles(symbol, tf, count=sym_state['gann_atr_period'] + 50)
+                candles = await fetch_candles(symbol, tf, count=STRAT_MIN_CANDLES + 20)
             except Exception as e:
                 lines.append(f"[{tf}] 🛑 فشل جلب الشموع: {e}")
                 continue
-            if not candles or len(candles) < 3:
+            if not candles:
                 lines.append(f"[{tf}] 🛑 بيانات غير كافية من OANDA.")
                 continue
 
-            live_px = master_px  # unified real-time price, NOT candles[-1]['close']
-            trend_up = True
-            if entry_mode == 'touch_trend':
-                if macro_trend_up is None:
-                    lines.append(f"[{tf}] 🛑 لا يمكن التحقق من الاتجاه (انظر أعلاه) -- الإشارات متجاهَلة.")
+            df = compute_strategy_indicators(candles)
+            if df is None:
+                lines.append(f"[{tf}] 🛑 عدد الشموع غير كافٍ لحساب EMA150/Stochastic (يلزم ~{STRAT_MIN_CANDLES}, المتوفر {len(candles)}).")
+                continue
+
+            sig = evaluate_strategy_signal(df, shift)
+            idx = len(df) - 1 - shift
+            ema15, ema50, ema150 = df['ema15'].iloc[idx], df['ema50'].iloc[idx], df['ema150'].iloc[idx]
+            k, d = df['stoch_k'].iloc[idx], df['stoch_d'].iloc[idx]
+            stack = 'صاعد (15>50>150)' if ema15 > ema50 > ema150 else ('هابط (150>50>15)' if ema150 > ema50 > ema15 else 'غير مصطف')
+            lines.append(f"[{tf}] EMA15={ema15:.2f} EMA50={ema50:.2f} EMA150={ema150:.2f} ({stack})  |  Stoch %K={k:.1f} %D={d:.1f}")
+
+            if sig is None:
+                lines.append(f"[{tf}] لا توجد إشارة تقاطع في المنطقة المطلوبة على هذه الشمعة.")
+                continue
+
+            if not allow_concur:
+                if sig['is_buy'] and True in open_dirs:
+                    lines.append(f"[{tf}] ✅ إشارة {'شراء' if sig['is_buy'] else 'بيع'} لكنها 🛑 محظورة: يوجد صفقة شراء مفتوحة بالفعل ولا يُسمح بالتزامن.")
                     continue
-                trend_up = macro_trend_up
+                if not sig['is_buy'] and False in open_dirs:
+                    lines.append(f"[{tf}] ✅ إشارة بيع لكنها 🛑 محظورة: يوجد صفقة بيع مفتوحة بالفعل ولا يُسمح بالتزامن.")
+                    continue
 
-            # Only trend-compatible levels can actually produce a trade in
-            # touch_trend mode -- an against-trend level being the closest
-            # one is meaningless noise (it will ALWAYS show "blocked by
-            # trend" and tells you nothing about whether a real opportunity
-            # is nearby). Restrict "nearest" to levels the bot would
-            # actually be willing to act on.
-            if entry_mode == 'touch_trend' and macro_trend_up is not None:
-                directional_levels = [lv for lv in levels if (lv['dir'] == 'dn') == trend_up]
-            else:
-                directional_levels = levels
-
-            nearest = None
-            for lv in directional_levels:
-                combo_key = f"{lv['key']}_{tf}" if bot_state['prot_allow_multi_tf'] else lv['key']
-                status = sym_state['gann_level_status'].get(combo_key)
-                dist = abs(live_px - lv['price'])
-                is_buy = (lv['dir'] == 'dn')
-                if nearest is None or dist < nearest['dist']:
-                    nearest = {'dist': dist, 'price': lv['price'], 'status': status, 'is_buy': is_buy}
-
-            if nearest is None:
-                lines.append(f"[{tf}] السعر: {live_px:.2f} -- لا توجد مستويات متوافقة مع الترند الحالي.")
-                continue
-
-            within_margin = nearest['dist'] <= margin
-            reason_blocked = []
-            if nearest['status'] == 'used':
-                reason_blocked.append('المستوى مستخدم بالفعل')
-            if not within_margin:
-                nd = nearest['dist']
-                reason_blocked.append(f"بعيد عن الهامش ({nd:.3f} > {margin:.3f})")
-
-            # exec_mode gate: within_margin above only checks the live tick,
-            # but _gann_tick_fire_check applies a SECOND, mode-specific gate
-            # on top of it (see gann_execution_mode) -- this was previously
-            # invisible here, so /diagnose could say "ready" for a level the
-            # real entry logic would still reject in close/hybrid mode.
-            exec_mode = bot_state.get('gann_execution_mode', 'instant')
-            closed_close = float(candles[-1]['close'])
-            spike_limit = bot_state.get('gann_spike_limit_pts', 20) * SYMBOL_INFO[symbol]['pip_value']
-
-            if exec_mode == 'all_concurrent':
-                # Each channel is fully independent (own dedup key), so report
-                # each one's own ready/blocked state rather than a single verdict.
-                chan_status = []
-                for chan, chan_lbl in (('touch', 'لمس'), ('close', 'إغلاق'), ('hybrid', 'هجين')):
-                    combo = f"{nearest['price']}_{chan}"  # display purposes only
-                    if not within_margin:
-                        chan_status.append(f"{chan_lbl}:🛑بعيد")
-                    elif chan == 'close' and abs(closed_close - nearest['price']) > margin:
-                        chan_status.append(f"{chan_lbl}:🛑إغلاق_بعيد")
-                    elif chan == 'hybrid' and abs(live_px - closed_close) > spike_limit:
-                        chan_status.append(f"{chan_lbl}:🛑قفزة")
-                    else:
-                        chan_status.append(f"{chan_lbl}:✅")
-                dir_lbl = 'دعم/شراء 🟢' if nearest['is_buy'] else 'مقاومة/بيع 🔴'
-                lines.append(f"[{tf}] السعر: {live_px:.2f} (all_concurrent)  |  أقرب مستوى [{dir_lbl}]: "
-                              f"{nearest['price']:.2f} (فرق {nearest['dist']:.3f})  |  " + '  '.join(chan_status))
-                continue
-
-            if within_margin and exec_mode == 'close':
-                if abs(closed_close - nearest['price']) > margin:
-                    reason_blocked.append(
-                        f"وضع التنفيذ Close: إغلاق آخر شمعة {tf} ({closed_close:.2f}) بعيد عن المستوى "
-                        f"({abs(closed_close - nearest['price']):.3f} > {margin:.3f})")
-            elif within_margin and exec_mode == 'hybrid':
-                if abs(live_px - closed_close) > spike_limit:
-                    reason_blocked.append(
-                        f"وضع التنفيذ Hybrid: قفزة سعرية عن آخر إغلاق ({abs(live_px - closed_close):.3f} > {spike_limit:.3f})")
-
-            status_icon = '✅ جاهز للدخول' if (within_margin and not reason_blocked) else ('🛑 ' + ' | '.join(reason_blocked) if reason_blocked else '🟡 خارج الهامش')
-            dir_lbl = 'دعم/شراء 🟢' if nearest['is_buy'] else 'مقاومة/بيع 🔴'
-            lines.append(f"[{tf}] السعر: {live_px:.2f} (وضع: {exec_mode})  |  أقرب مستوى موافق للترند [{dir_lbl}]: {nearest['price']:.2f} (فرق {nearest['dist']:.3f})  |  {status_icon}")
+            lines.append(f"[{tf}] ✅ إشارة {'شراء 🟢' if sig['is_buy'] else 'بيع 🔴'} جاهزة للتنفيذ عند دورة السكانر القادمة.")
 
     return "\n".join(lines)
 
@@ -2788,9 +2437,9 @@ async def export_execution_details_report() -> str | None:
     return fname
 
 
-async def gann_monitor_scanner() -> None:
+async def strategy_monitor_scanner() -> None:
     global _last_scanner_error_alert_ts, _last_any_tick_ts
-    c_log('Gann live scanner started.')
+    c_log('Strategy live scanner started.')
     while True:
         try:
             # ── Cold-start self-heal ──
@@ -2883,7 +2532,7 @@ async def gann_monitor_scanner() -> None:
                 stale_real_closures = []
                 for symbol in stale_active_symbols:
                     sym_state = bot_state['symbol_state'][symbol]
-                    for tid, tr in list(sym_state['gann_open_trades'].items()):
+                    for tid, tr in list(sym_state['strategy_open_trades'].items()):
                         if tr.get('is_real') and _metaapi_conn:
                             stale_real_closures.append((symbol, tid, sym_state, tr))
                 if stale_real_closures:
@@ -2899,20 +2548,8 @@ async def gann_monitor_scanner() -> None:
             # --- First pass: track open trades ---
             for symbol in active_symbols:
                 sym_state = bot_state['symbol_state'][symbol]
-                
-                if bot_state.get('prot_cycle_inval', True) and sym_state.get('gann_close_used'):
-                    mc = await fetch_candles(symbol, '1m', count=2)
-                    if mc:
-                        live_px = float(mc[-1]['close'])
-                        dist = abs(live_px - sym_state['gann_close_used'])
-                        pv = SYMBOL_INFO[symbol]['pip_value']
-                        inval_pts = bot_state.get('prot_cycle_inval_pts', 200) * pv
-                        if dist > inval_pts:
-                            sym_state['gann_levels'] = []
-                            sym_state['gann_close_used'] = None
-                            await send_tg_msg(f"🚨 <b>إلغاء دورة {symbol}:</b> السعر تحرك بحدة! تم تجميد التداول بانتظار الدورة القادمة للحماية.")
-                
-                if sym_state['gann_open_trades']:
+
+                if sym_state['strategy_open_trades']:
                     # --- MetaAPI Strict Reconciliation (Per Symbol, Just-In-Time) ---
                     actual_positions = {}
                     sync_failed = False
@@ -2961,7 +2598,7 @@ async def gann_monitor_scanner() -> None:
                     
                     # Pre-fetch history if there are missing real trades to prevent DDoS
                     history_deals_cache = None
-                    missing_tids = [t for t, v in sym_state['gann_open_trades'].items() if v.get('is_real') and t not in actual_positions]
+                    missing_tids = [t for t, v in sym_state['strategy_open_trades'].items() if v.get('is_real') and t not in actual_positions]
                     if missing_tids and _metaapi_conn:
                         # Retry with backoff (Point 6): MetaAPI's own history sync can
                         # lag a few seconds behind the actual broker-side close,
@@ -2989,7 +2626,7 @@ async def gann_monitor_scanner() -> None:
                             if all(str(t) in found_now for t in missing_tids):
                                 break  # every missing trade's closing deal is visible -- no need to keep waiting
                     
-                    for tid, tr in list(sym_state['gann_open_trades'].items()):
+                    for tid, tr in list(sym_state['strategy_open_trades'].items()):
                         is_buy = tr.get('is_buy')
                         tp = tr.get('tp')
                         sl = tr.get('sl')
@@ -3066,8 +2703,8 @@ async def gann_monitor_scanner() -> None:
                         outcome = core_eval_outcome(is_buy, active_px, tp, sl)
                             
                         if bot_state.get('prot_cost_be', True) and sym_state.get('break_even_enabled') and not tr.get('be_activated'):
-                            be_pts = sym_state.get('gann_be_trigger_points', 40)
-                            net_be = core_eval_break_even(is_buy, entry, active_px, SYMBOL_INFO[symbol]['pip_value'], be_pts, sym_state.get('gann_atr_period', 14), bot_state.get('prot_cost_be', True))
+                            be_pts = sym_state.get('strategy_be_trigger_points', 40)
+                            net_be = core_eval_break_even(is_buy, entry, active_px, SYMBOL_INFO[symbol]['pip_value'], be_pts, sym_state.get('strategy_atr_period', 14), bot_state.get('prot_cost_be', True))
                             if net_be is not None:
                                 if is_real and _metaapi_conn:
                                     try:
@@ -3089,7 +2726,7 @@ async def gann_monitor_scanner() -> None:
                         if outcome:
                             closed_ids.append(tid)
                             bot_state['live_daily_realized'] += trade_pl
-                            msg = f"🔔 <b>تحديث صفقة [{symbol} - جان {tf}]</b>\n\nالنتيجة: {outcome} ({trade_pl}$)\nسعر الإغلاق: {live_px:.2f}"
+                            msg = f"🔔 <b>تحديث صفقة [{symbol} - {tf}]</b>\n\nالنتيجة: {outcome} ({trade_pl}$)\nسعر الإغلاق: {live_px:.2f}"
                             await send_tg_msg(msg)
                             await _record_closed_trade_history(
                                 symbol, tid, tr, exit_px=live_px, pnl=trade_pl, outcome_label=outcome,
@@ -3099,8 +2736,8 @@ async def gann_monitor_scanner() -> None:
                             total_floating += trade_pl
 
                     for tid in closed_ids:
-                        if tid in sym_state['gann_open_trades']:
-                            del sym_state['gann_open_trades'][tid]
+                        if tid in sym_state['strategy_open_trades']:
+                            del sym_state['strategy_open_trades'][tid]
                             await save_bot_persistence()
 
             # --- Evaluate Daily Limits ---
@@ -3119,7 +2756,7 @@ async def gann_monitor_scanner() -> None:
                 real_closures = []
                 for symbol in active_symbols:
                     sym_state = bot_state['symbol_state'][symbol]
-                    for tid, tr in list(sym_state['gann_open_trades'].items()):
+                    for tid, tr in list(sym_state['strategy_open_trades'].items()):
                         if tr.get('is_real') and _metaapi_conn:
                             real_closures.append((symbol, tid, sym_state, tr))
                         else:
@@ -3127,7 +2764,7 @@ async def gann_monitor_scanner() -> None:
                             px = tr.get('last_known_px', tr.get('entry'))
                             outcome_lbl = 'ربح ✅' if pl >= 0 else 'خسارة ❌'
                             await send_tg_msg(
-                                f"⏹️ <b>إغلاق (وهمي) [{symbol} - جان {tr.get('tf')}]</b>\n"
+                                f"⏹️ <b>إغلاق (وهمي) [{symbol} - {tr.get('tf')}]</b>\n"
                                 f"سبب الإغلاق: حماية رأس المال (تراجع/هدف يومي)\n\n"
                                 f"الاتجاه: {'BUY 📈' if tr.get('is_buy') else 'SELL 📉'}\n"
                                 f"الدخول: {tr.get('entry')}  |  الإغلاق: {px}\n"
@@ -3139,7 +2776,7 @@ async def gann_monitor_scanner() -> None:
                                 outcome_label=('WIN' if pl > 0 else 'LOSS' if pl < 0 else 'BREAK_EVEN'),
                                 close_reason='daily_capital_protection_forced_close', pnl_confirmed=False,
                             )
-                            del sym_state['gann_open_trades'][tid]
+                            del sym_state['strategy_open_trades'][tid]
                             await save_bot_persistence()
                 await _close_metaapi_trades_batch(real_closures)
                 continue
@@ -3147,129 +2784,86 @@ async def gann_monitor_scanner() -> None:
             for symbol in active_symbols:
                 try:
                     sym_state = bot_state['symbol_state'][symbol]
-
-                    flt_type = sym_state['trend_filter_type']
-                    ttf = sym_state['trend_timeframe']
-                    enabled_tfs = [tf for tf, on in sym_state['gann_monitor_tfs'].items() if on]
-                    if not sym_state['gann_cycle_active'] or not sym_state['gann_levels']:
+                    enabled_tfs = [tf for tf, on in sym_state['strategy_monitor_tfs'].items() if on]
+                    if not enabled_tfs:
                         continue
 
-                    macro_trend_up = None
-                    if sym_state['gann_entry_mode'] == 'touch_trend':
-                        flt_is_vwap = flt_type in ('vwap', 'both')
-                        flt_is_ema  = flt_type in ('ema', 'both')
-                        p_vwap = sym_state['trend_vwap_period'] if flt_is_vwap else 0
-                        p_ema  = sym_state['trend_ema_period'] if flt_is_ema else 0
-                        max_period = max(p_vwap, p_ema, 100)
-                    
-                        trend_candles = await fetch_candles(symbol, ttf, count=max(max_period+10, 120))
-                        if trend_candles:
-                            df_trend = pd.DataFrame(trend_candles)
-                            current_trend_close = float(trend_candles[-1]['close'])
-                        
-                            if flt_is_vwap:
-                                df_trend['Typical_Price'] = (df_trend['high'] + df_trend['low'] + df_trend['close']) / 3
-                                df_trend['VWAP'] = (df_trend['Typical_Price'] * df_trend['volume']).rolling(window=p_vwap).sum() / df_trend['volume'].rolling(window=p_vwap).sum()
-                                current_vwap = df_trend.iloc[-1]['VWAP']
-                                if pd.isna(current_vwap): current_vwap = current_trend_close
-                                vwap_up = current_trend_close > current_vwap
-                            
-                            if flt_is_ema:
-                                df_trend['EMA'] = df_trend['close'].ewm(span=p_ema, adjust=False).mean()
-                                current_ema = df_trend.iloc[-1]['EMA']
-                                ema_up = current_trend_close > current_ema
-
-                            if flt_type == 'vwap':
-                                macro_trend_up = vwap_up
-                            elif flt_type == 'ema':
-                                macro_trend_up = ema_up
-                            elif flt_type == 'both':
-                                macro_trend_up = vwap_up if vwap_up == ema_up else None
-
-                    levels      = gann_active_levels(symbol)
-                    margin      = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
                     detect_time = datetime.now(timezone.utc)
+                    shift = bot_state.get('signal_candle_shift', 1)
+                    allow_concur = bot_state.get('allow_concurrent_trades', False)
+                    open_dirs = {v.get('is_buy') for v in sym_state['strategy_open_trades'].values() if isinstance(v, dict)}
+                    last_signal_candle = sym_state.setdefault('strategy_last_signal_candle', {})
 
-                    # ── Event-driven touch detection (structural fix) ──
-                    # This block used to fetch a price and immediately check
-                    # it against every level/timeframe right here, once per
-                    # scan cycle -- which is exactly how a quote could sit
-                    # around for seconds before actually being acted on if
-                    # anything upstream (reconciliation, a slow OANDA call)
-                    # made this cycle run long.
-                    #
-                    # It no longer fires anything. It ONLY refreshes
-                    # _gann_cache[symbol] -- the levels, trend state, and
-                    # each enabled tf's closed-candle data. The actual touch
-                    # decision now happens inside _gann_tick_fire_check(),
-                    # invoked directly from _GannPriceListener.on_symbol_
-                    # price_updated the INSTANT a new tick arrives, using
-                    # that exact tick's price. There is no longer a "wait
-                    # for the next cycle to notice" step between a tick
-                    # landing and a decision being made -- acting on a stale
-                    # quote is no longer something a slow cycle can cause.
-                    #
-                    # Refreshing this cache on the existing ~cycle cadence is
-                    # fine: levels/trend/candle data doesn't need tick-level
-                    # freshness, only the live price used against it does,
-                    # and that now always comes straight from the tick.
-                    tf_data = {}
                     for tf in enabled_tfs:
-                        need = sym_state['gann_atr_period'] + 50
-                        candles = await fetch_candles(symbol, tf, count=need)
-                        if not candles or len(candles) < 3:
-                            # This used to be a fully SILENT skip -- no Telegram
-                            # message, nothing. It's exactly the kind of failure
-                            # that can make a whole batch of timeframes go quiet
-                            # with zero visibility. Now at least it's captured in
-                            # the diagnostic log for /export_diag_excel.
-                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf,
-                                           'skip_reason': f'insufficient_oanda_candles(got={len(candles) if candles else 0})'})
+                        # Never stack two positions on the same tf.
+                        if any(isinstance(v, dict) and v.get('tf') == tf for v in sym_state['strategy_open_trades'].values()):
                             continue
-                        tf_data[tf] = {'candles': candles, 'closed_close': float(candles[-1]['close'])}
 
-                    _gann_cache[symbol] = {
-                        'levels': levels, 'margin': margin, 'trend_up': macro_trend_up,
-                        'enabled_tfs': list(tf_data.keys()), 'tf_data': tf_data,
-                        'refreshed_at': detect_time,
-                    }
+                        candles = await fetch_candles(symbol, tf, count=STRAT_MIN_CANDLES + 20)
+                        if not candles:
+                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf,
+                                           'skip_reason': 'insufficient_oanda_candles(got=0)'})
+                            continue
 
-                    # Diagnostics: same visibility as before (nearest compatible
-                    # level + distance, whether it was in margin), now logged
-                    # EVERY cycle regardless of WS quote health -- this used to
-                    # log NOTHING at all whenever live_quotes[symbol] was empty/
-                    # stale, which is exactly the situation most worth capturing:
-                    # _gann_tick_fire_check (the only thing that ever opens a
-                    # real trade) is driven purely by WS ticks, so a dead/starved
-                    # WS feed silently stops all entries AND silently emptied
-                    # this very log at the same time, making both symptoms
-                    # ("ready per /diagnose, zero trades" and "no diag log yet")
-                    # look unrelated when they're actually the same root cause.
-                    q = live_quotes.get(symbol)
-                    ws_age_s = round(time.monotonic() - q['ts'], 1) if q else None
-                    ws_status = 'live' if (q and ws_age_s <= _QUOTE_STALE_SECONDS) else ('stale' if q else 'never_received')
-                    diag_px, price_source, _age_ms = await _lq_price_with_fallback(symbol)
-                    entry_mode = sym_state['gann_entry_mode']
-                    directional_levels = (
-                        [l for l in levels if (l['dir'] == 'dn') == macro_trend_up]
-                        if entry_mode == 'touch_trend' and macro_trend_up is not None else levels
-                    )
-                    nearest_dist = None; nearest_price = None
-                    if diag_px is not None:
-                        for l in directional_levels:
-                            d = abs(diag_px - l['price'])
-                            if nearest_dist is None or d < nearest_dist:
-                                nearest_dist = d; nearest_price = l['price']
-                    _diag_log_add({'ts': detect_time, 'symbol': symbol, 'master_px': diag_px,
-                                   'price_source': price_source, 'ws_status': ws_status, 'ws_quote_age_s': ws_age_s,
-                                   'trend_up': macro_trend_up, 'margin': margin,
-                                   'nearest_compatible_level': nearest_price, 'nearest_dist': nearest_dist,
-                                   'within_margin': (nearest_dist is not None and nearest_dist <= margin),
-                                   'skip_reason': ('no_price_available' if diag_px is None else
-                                                   'cache_refresh_only(firing_is_now_tick_driven)')})
+                        df = compute_strategy_indicators(candles)
+                        if df is None:
+                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf,
+                                           'skip_reason': f'insufficient_candles_for_indicators(got={len(candles)}, need={STRAT_MIN_CANDLES})'})
+                            continue
+
+                        sig = evaluate_strategy_signal(df, shift)
+                        if sig is None:
+                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf,
+                                           'skip_reason': 'no_signal_this_candle'})
+                            continue
+
+                        # Dedup: only ever act once per (symbol, tf, candle).
+                        candle_key = str(sig.get('candle_time'))
+                        if last_signal_candle.get(tf) == candle_key:
+                            continue
+
+                        # allow_concurrent_trades gate (Point 4 of the spec):
+                        # blocks a new Buy while a Buy is open (and likewise
+                        # for Sell) -- checked across the whole symbol, not
+                        # just this tf.
+                        if not allow_concur:
+                            if sig['is_buy'] and True in open_dirs:
+                                _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf,
+                                               'skip_reason': 'blocked_concurrent_buy_open'})
+                                continue
+                            if not sig['is_buy'] and False in open_dirs:
+                                _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf,
+                                               'skip_reason': 'blocked_concurrent_sell_open'})
+                                continue
+
+                        # Claim this candle for this tf BEFORE awaiting the
+                        # (slower) trade-open path, so a long-running open
+                        # can't leave the window open for a duplicate fire
+                        # next cycle off the same candle.
+                        last_signal_candle[tf] = candle_key
+                        await save_bot_persistence()
+
+                        signal_price = float(candles[-1 - shift]['close'])
+                        dir_lbl = 'شراء 🟢 BUY' if sig['is_buy'] else 'بيع 🔴 SELL'
+                        reason = (f"[{symbol} - {tf}]  إشارة {dir_lbl}\n"
+                                  f"EMA15={sig['ema15']:.2f} EMA50={sig['ema50']:.2f} EMA150={sig['ema150']:.2f}  |  "
+                                  f"Stoch %K={sig['k']:.1f} %D={sig['d']:.1f}")
+
+                        # Update the direction set immediately so a second tf
+                        # firing in the SAME cycle also respects the gate.
+                        open_dirs.add(sig['is_buy'])
+
+                        await _strategy_open_trade(
+                            symbol, sig['is_buy'], signal_price, candles, reason, tf,
+                            detect_time=detect_time, t1_signal_ts=time.monotonic(),
+                            feed_source='oanda_candle_close', feed_age_ms=None,
+                        )
+
+                    _diag_log_add({'ts': detect_time, 'symbol': symbol,
+                                   'skip_reason': 'cycle_complete'})
 
                 except Exception as sym_exc:
-                    log_exception(f"gann_monitor_scanner per-symbol [{symbol}]", sym_exc)
+                    log_exception(f"strategy_monitor_scanner per-symbol [{symbol}]", sym_exc)
                     now_mono_sym = time.monotonic()
                     if now_mono_sym - _last_scanner_error_alert_ts > 300:
                         _last_scanner_error_alert_ts = now_mono_sym
@@ -3278,8 +2872,9 @@ async def gann_monitor_scanner() -> None:
                             f"(باقي الرموز تستمر بشكل طبيعي):\n{sym_exc}"
                         )
                     continue
+
         except Exception as e:
-            log_exception('gann_monitor_scanner main loop', e)
+            log_exception('strategy_monitor_scanner main loop', e)
             # This top-level catch wraps EVERY symbol's processing for the
             # whole cycle -- an exception anywhere (even for just one
             # symbol/timeframe) previously aborted the ENTIRE cycle
@@ -3291,7 +2886,7 @@ async def gann_monitor_scanner() -> None:
             if now_mono - _last_scanner_error_alert_ts > 300:  # at most once per 5 min
                 _last_scanner_error_alert_ts = now_mono
                 await send_tg_msg(
-                    f"🛑 <b>خطأ غير متوقع بدورة الفحص الحية (gann_monitor_scanner):</b>\n{e}\n"
+                    f"🛑 <b>خطأ غير متوقع بدورة الفحص الحية (strategy_monitor_scanner):</b>\n{e}\n"
                     f"تم تخطي بقية هذه الدورة بالكامل بسببه. سيُعاد المحاولة بالدورة القادمة (~15 ثانية). "
                     f"إذا تكرر هذا الخطأ، راجع السجل الكامل (traceback) على السيرفر."
                 )
@@ -3301,332 +2896,136 @@ async def gann_monitor_scanner() -> None:
 # PRO BACKTEST ENGINE (Macro Trend & Smart Break-Even)
 # ─────────────────────────────────────────────────────────────
 
-# Recalculation cadence for gann_calculation_mode == 'dynamic_live'. Shared
-# constant so the live scanner (gann_cycle_manager) and both backtest
-# engines (_build_gann_cycle_defs) use the exact same cadence -- required
-# for backtest/live parity.
-GANN_DYNAMIC_RECALC_MINUTES = 5
+def _build_strategy_bt_excel(fname: str, res: dict, suspend_trigger_time: dict, suspended_days: dict) -> None:
+    """Pure sync workbook build for run_strategy_backtest's report. Deliberately
+    contains NO asyncio / await -- it is meant to be run via
+    `await asyncio.to_thread(...)` so the styling/row-by-row loops (CPU-bound,
+    can take seconds on a large backtest) never block the event loop that
+    oanda_live_price_poller and the rest of the bot depend on."""
+    wb = openpyxl.Workbook()
+    ws_trades = wb.active
+    ws_trades.title = "الصفقات"
 
-async def gann_cycle_manager() -> None:
-    c_log('Gann cycle manager started.')
-    while True:
-        try:
-            now_utc = datetime.now(timezone.utc)
-            calc_mode = bot_state.get('gann_calculation_mode', 'static_h1')
-            active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
-            for symbol in active_symbols:
-                sym_state = bot_state['symbol_state'][symbol]
-                if not sym_state['gann_cycle_active']:
-                    continue
+    headers = ["الزوج", "وقت الصفقة (DAM)", "TF", "اتجاه", "الدخول (الإشارة)", "الهدف (TP)", "الوقف (SL)", "النتيجة", "ربح ($)", "رصيد تراكمي ($)"]
+    ws_trades.append(headers)
 
-                if calc_mode == 'dynamic_live':
-                    # Classic H1-close anchoring is bypassed entirely: levels
-                    # are recomputed every GANN_DYNAMIC_RECALC_MINUTES off the
-                    # current live streamed price. 'gann_cycle_started_at'
-                    # doubles as "last dynamic recalc timestamp" in this mode
-                    # (it's not otherwise load-bearing outside display/logging).
-                    last_recalc = sym_state['gann_cycle_started_at']
-                    if last_recalc and (now_utc - last_recalc).total_seconds() < GANN_DYNAMIC_RECALC_MINUTES * 60:
-                        continue
-                    live_px, _src, _age = await _lq_price_with_fallback(symbol)
-                    if live_px is None:
-                        continue
-                    sym_state['gann_levels'] = gann_calc_levels(symbol, live_px)
-                    sym_state['gann_close_used'] = live_px
-                    sym_state['gann_last_h1_time'] = now_utc
-                    sym_state['gann_cycle_started_at'] = now_utc
-                    sym_state['gann_level_status'] = {}
-                    # Pre-compute ATR for all enabled timeframes to avoid pandas overhead
-                    # in the hot path during trade execution
-                    sym_state['gann_atr_cache'] = {}
-                    for tf in sym_state['gann_monitor_tfs']:
-                        if sym_state['gann_monitor_tfs'].get(tf):
-                            tf_candles = await fetch_candles(symbol, tf, count=sym_state['gann_atr_period'] + 50)
-                            if tf_candles:
-                                sym_state['gann_atr_cache'][tf] = _gann_atr(tf_candles, sym_state['gann_atr_period'])
-                    c_log(f'[{symbol}] Dynamic Gann recalculation at live_px={live_px}')
-                    continue
-
-                cycle_h = sym_state['gann_cycle_hours']
-                last_h1 = await _gann_fetch_last_closed_anchor(symbol)
-                
-                if last_h1:
-                    h1_time = last_h1['time']
-                    # Check if this new H1 candle is newer than our currently tracked one
-                    if not sym_state['gann_last_h1_time'] or h1_time > sym_state['gann_last_h1_time']:
-                        # Only trigger if the difference in hours is >= cycle_h
-                        if not sym_state['gann_last_h1_time'] or (h1_time - sym_state['gann_last_h1_time']).total_seconds() / 3600.0 >= cycle_h:
-                            h1_close = float(last_h1['close'])
-                            sym_state['gann_levels'] = gann_calc_levels(symbol, h1_close)
-                            sym_state['gann_close_used'] = h1_close
-                            sym_state['gann_last_h1_time'] = h1_time
-                            sym_state['gann_cycle_started_at'] = now_utc
-                            
-                            # Clear used levels so we can take trades again!
-                            sym_state['gann_level_status'] = {}
-                            
-                            c_log(f'[{symbol}] New {cycle_h}h cycle started at {h1_close}')
-                            await send_tg_msg(f"🔄 <b>تحديث دورة جان ({cycle_h}h)</b>\nالزوج: {symbol}\nإغلاق {_anchor_label()}: {h1_close:.5f}\nتم تصفير المستويات لتبدأ من جديد!")
-                            
-        except Exception as e:
-            log_exception('gann_cycle_manager main loop', e)
-
-        await asyncio.sleep(60)
-
-# -----------------------------------------------------------------
-# INDEPENDENT GLOBAL LEDGER RECONCILIATION
-# -----------------------------------------------------------------
-# Defense-in-depth on top of the per-tick reconciliation already inside
-# gann_monitor_scanner. That reconciliation only runs per-symbol, only
-# when a symbol has locally-tracked open trades, and shares its process
-# and state with the rest of the bot -- if bot_state itself is what's
-# wrong (e.g. a trade never got recorded locally in the first place),
-# the in-loop check can't catch it because it only checks trades IT
-# already knows about.
-#
-# This task instead starts from the broker's side: fetch every open
-# position that MetaAPI reports for this account, and check whether
-# each one is accounted for in bot_state. A position on the broker that
-# the bot has NO record of at all is the "ghost position" / unmanaged-
-# exposure scenario, and it's undetectable from inside
-# gann_monitor_scanner's per-symbol loop by construction.
-RECONCILIATION_INTERVAL_SECONDS = 300  # every 5 minutes
-_recon_consecutive_mismatches = 0
-_RECON_MISMATCH_HALT_THRESHOLD = 3
-
-async def global_ledger_reconciliation() -> None:
-    global _recon_consecutive_mismatches
-    c_log('Global ledger reconciliation started (independent broker cross-check).')
-    while True:
-        try:
-            await asyncio.sleep(RECONCILIATION_INTERVAL_SECONDS)
-
-            if bot_state.get('connection_state', CONN_RUNNING) != CONN_RUNNING or not _metaapi_conn:
-                continue
-
-            try:
-                broker_positions = _metaapi_conn.terminal_state.positions
-                if not isinstance(broker_positions, list):
-                    raise TypeError(f"get_positions() returned {type(broker_positions).__name__}, expected list")
-            except Exception as e:
-                log_exception('global_ledger_reconciliation get_positions', e)
-                continue
-
-            broker_ids = {str(p['id']) for p in broker_positions if p.get('id')}
-
-            known_ids = set()
-            for sym, ss in bot_state['symbol_state'].items():
-                for tid, tr in ss.get('gann_open_trades', {}).items():
-                    if tr.get('is_real'):
-                        known_ids.add(str(tid))
-
-            ghost_ids = broker_ids - known_ids
-            missing_ids = known_ids - broker_ids
-
-            if ghost_ids:
-                _recon_consecutive_mismatches += 1
-                c_log(f"RECONCILIATION MISMATCH: {len(ghost_ids)} broker position(s) with NO matching bot "
-                      f"record: {ghost_ids}. Consecutive mismatches: {_recon_consecutive_mismatches}")
-                await send_tg_msg(
-                    f"🚨 <b>تحذير مطابقة الحساب المستقل:</b>\n"
-                    f"يوجد {len(ghost_ids)} صفقة مفتوحة على الوسيط لا يعرفها البوت إطلاقاً.\n"
-                    f"هذا يعني احتمال وجود تعرض غير مُدار (ghost position). يرجى التحقق يدوياً فوراً.\n"
-                    f"IDs: {ghost_ids}"
-                )
-                if _recon_consecutive_mismatches >= _RECON_MISMATCH_HALT_THRESHOLD:
-                    await set_connection_state(
-                        CONN_HALTED,
-                        f"{_recon_consecutive_mismatches} consecutive independent reconciliation checks found "
-                        f"unmanaged broker positions. Halting all trading until a human confirms account state."
-                    )
-            else:
-                if _recon_consecutive_mismatches > 0:
-                    c_log("Reconciliation recovered: no ghost positions found this check.")
-                _recon_consecutive_mismatches = 0
-
-            if missing_ids:
-                c_log(f"Reconciliation note: {len(missing_ids)} bot-tracked trade(s) not currently on "
-                      f"broker (expected if closed this cycle): {missing_ids}")
-
-        except Exception as e:
-            log_exception('global_ledger_reconciliation main loop', e)
-
-def _build_gann_cycle_defs(sym_state: dict, valid_h1: list, mc_1m: list) -> list[dict]:
-    """Single source of truth for 'when do Gann levels get (re)anchored and
-    from what price', shared by BOTH backtest engines (run_gann_backtest and
-    run_live_twin_simulation) so a change to bot_state['gann_calculation_mode']
-    always simulates identically to what the live scanner (gann_cycle_manager)
-    actually does -- this is what satisfies the backtest/live parity
-    requirement, rather than keeping two separately-maintained copies of the
-    same logic that could silently drift apart.
-
-    Returns a list of {'t_start', 't_end', 'close'} dicts:
-      - static_h1   : one entry per closed anchor-tf candle (legacy/unchanged).
-      - dynamic_live: one entry every GANN_DYNAMIC_RECALC_MINUTES, priced off
-        the most recent 1m close at that instant -- the backtest's proxy for
-        "current live_px", since historical tick data isn't available.
-    """
-    mode = bot_state.get('gann_calculation_mode', 'static_h1')
-    cycle_h = sym_state['gann_cycle_hours']
-
-    if mode != 'dynamic_live':
-        out = []
-        for h1 in valid_h1:
-            t_start = h1['time'] + timedelta(hours=1)
-            out.append({'t_start': t_start, 't_end': t_start + timedelta(hours=cycle_h), 'close': float(h1['close'])})
-        return out
-
-    px_series = sorted(mc_1m, key=lambda c: c['time']) if mc_1m else []
-    if not px_series:
-        return []
-    out = []
-    bucket = px_series[0]['time'].floor(f'{GANN_DYNAMIC_RECALC_MINUTES}min')
-    last_t = px_series[-1]['time']
-    i = 0; n = len(px_series)
-    while bucket <= last_t:
-        while i + 1 < n and px_series[i + 1]['time'] <= bucket:
-            i += 1
-        if px_series[i]['time'] <= bucket:
-            out.append({'t_start': bucket, 't_end': bucket + timedelta(minutes=GANN_DYNAMIC_RECALC_MINUTES),
-                        'close': float(px_series[i]['close'])})
-        bucket += timedelta(minutes=GANN_DYNAMIC_RECALC_MINUTES)
-    return out
-
-def _add_concurrent_analysis_sheets(wb, trade_logs: list, pnl_key: str, outcome_key: str, slippage_key: str = None) -> None:
-    """Only called when gann_execution_mode == 'all_concurrent'. Splits
-    trade_logs (each row already tagged with 'trigger_type' in
-    {'touch','close','hybrid'} from the signal-generation stage of whichever
-    engine called this) into 3 per-channel sheets plus a side-by-side
-    Performance_Comparison sheet, so a 24h concurrent run directly answers
-    "which of the 3 execution methods actually wins" without the user having
-    to run and diff 3 separate backtests by hand."""
-    from openpyxl.utils import get_column_letter
     gray_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
-    channel_sheets = {'touch': 'Touch_Trades', 'close': 'Close_Trades', 'hybrid': 'Hybrid_Trades'}
-    channel_rows = {'touch': [], 'close': [], 'hybrid': []}
-    for tr in trade_logs:
-        ch = tr.get('trigger_type', 'touch')
-        if ch in channel_rows:
-            channel_rows[ch].append(tr)
+    header_fill = PatternFill(start_color="E2E3E5", end_color="E2E3E5", fill_type="solid")
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    be_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
 
-    internal_keys = {'cycle_ts', 'cycle_time_str', 'cycle_close', 'trigger_type'}
-    cols = [k for k in trade_logs[0].keys() if k not in internal_keys] if trade_logs else []
+    for cell in ws_trades[1]:
+        cell.fill = gray_fill
+        cell.font = Font(bold=True)
 
-    made_sheets = []
-    for ch, sheet_name in channel_sheets.items():
-        ws = wb.create_sheet(sheet_name)
-        made_sheets.append(ws)
-        ws.append(cols)
-        for cell in ws[1]:
-            cell.fill = gray_fill; cell.font = Font(bold=True)
-        for tr in channel_rows[ch]:
-            ws.append([tr.get(c) for c in cols])
-        for i in range(1, len(cols) + 1):
-            ws.column_dimensions[get_column_letter(i)].width = 20.0
+    current_cycle = None
+    for tr in res['trade_logs']:
+        if tr['cycle_ts'] != current_cycle:
+            current_cycle = tr['cycle_ts']
+            ws_trades.append([f"إشارة: {tr['cycle_time_str']}  |  دخول: {tr['cycle_close']:.2f}"] + [""]*9)
+            row_idx = ws_trades.max_row
+            ws_trades.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=10)
+            ws_trades.cell(row=row_idx, column=1).fill = header_fill
+            ws_trades.cell(row=row_idx, column=1).font = Font(bold=True)
 
-    ws_cmp = wb.create_sheet("Performance_Comparison")
-    made_sheets.append(ws_cmp)
-    ws_cmp.append(["Metric", "Touch (لمس مباشر)", "Close (إغلاق شمعة)", "Hybrid (هجين)"])
-    for cell in ws_cmp[1]:
-        cell.fill = gray_fill; cell.font = Font(bold=True)
+        _OUTCOME_DISPLAY = {'WIN': 'WIN ✅', 'LOSS': 'LOSS ❌', 'BREAK_EVEN': 'BREAK_EVEN ⚖️', 'DAILY_LIMIT': 'DAILY_LIMIT ⏹️'}
+        row_data = [
+            tr['الزوج'], tr['وقت الصفقة (DAM)'], tr['TF'], tr['اتجاه'], tr['الدخول (الإشارة)'],
+            tr['الهدف (TP)'], tr['الوقف (SL)'], _OUTCOME_DISPLAY.get(tr['النتيجة'], tr['النتيجة']), tr['ربح ($)'], tr['رصيد تراكمي ($)']
+        ]
+        ws_trades.append(row_data)
+        row_idx = ws_trades.max_row
 
-    def metrics_for(rows):
-        wins = [r for r in rows if r.get(outcome_key) == 'WIN']
-        losses = [r for r in rows if r.get(outcome_key) == 'LOSS']
-        gross_profit = sum((r.get(pnl_key) or 0) for r in wins)
-        gross_loss = sum((r.get(pnl_key) or 0) for r in losses)
-        net = sum((r.get(pnl_key) or 0) for r in rows)
-        wr = round(100 * len(wins) / max(1, len(wins) + len(losses)), 1)
-        rows_sorted = sorted(rows, key=lambda r: r.get('cycle_ts', 0))
-        eq = 0.0; peak = 0.0; mdd = 0.0
-        for r in rows_sorted:
-            eq += (r.get(pnl_key) or 0)
-            peak = max(peak, eq)
-            mdd = min(mdd, eq - peak)
-        avg_slip = None
-        if slippage_key:
-            slips = [r.get(slippage_key) for r in rows if r.get(slippage_key) is not None]
-            avg_slip = round(sum(slips) / len(slips), 2) if slips else None
-        return dict(total=len(rows), win=len(wins), loss=len(losses), wr=wr,
-                    gp=round(gross_profit, 2), gl=round(gross_loss, 2), net=round(net, 2),
-                    mdd=round(mdd, 2), avg_slip=avg_slip)
+        fill = None
+        if tr['النتيجة'] == 'WIN': fill = green_fill
+        elif tr['النتيجة'] == 'LOSS': fill = red_fill
+        elif tr['النتيجة'] == 'BREAK_EVEN': fill = be_fill
 
-    m = {ch: metrics_for(channel_rows[ch]) for ch in channel_rows}
-    rows_spec = [
-        ("Total Trades", 'total'), ("Winning Trades", 'win'), ("Losing Trades", 'loss'),
-        ("Win Rate (%)", 'wr'), ("Gross Profit ($)", 'gp'), ("Gross Loss ($)", 'gl'),
-        ("Net PnL ($)", 'net'), ("Max Drawdown ($)", 'mdd'),
-    ]
-    if slippage_key:
-        rows_spec.append(("Average Slippage (Pips)", 'avg_slip'))
-    for label, key in rows_spec:
-        ws_cmp.append([label, m['touch'][key], m['close'][key], m['hybrid'][key]])
-    for i in range(1, 5):
-        ws_cmp.column_dimensions[get_column_letter(i)].width = 26.0
+        if fill:
+            for col in range(1, 11):
+                ws_trades.cell(row=row_idx, column=col).fill = fill
+
+    ws_cycles = wb.create_sheet("دورات H1")
+    ws_cycles.append(["الزوج", "وقت أول شمعة بالنطاق (DAM)", "الإغلاق", "عدد الإشارات", "ملاحظة"])
+    for cell in ws_cycles[1]: cell.fill = gray_fill; cell.font = Font(bold=True)
+
+    for cycle in res['cycle_logs']:
+        num_trades = len([t for t in res['trade_logs'] if t['cycle_ts'] == cycle['time_ts']])
+        cycle_day = _utc_to_dam(cycle['time_dt']).strftime('%Y-%m-%d')
+        if num_trades > 0:
+            note = f"تم تنفيذ {num_trades} صفقة"
+        elif cycle_day in suspend_trigger_time and cycle['time_dt'] >= suspend_trigger_time[cycle_day]:
+            # Distinguish "day was already halted by capital protection"
+            # from "price genuinely never reached a level" -- these are
+            # very different situations and were previously reported
+            # identically, which made it look like the strategy just
+            # wasn't triggering when actually trading had stopped.
+            note = "🛑 اليوم متوقف (تم تفعيل حماية رأس المال مسبقاً)"
+        else:
+            note = "لم يلمس السعر أي مستوى"
+        ws_cycles.append([cycle['symbol'], _utc_to_dam(cycle['time_dt']).strftime('%Y-%m-%d %H:%M'), cycle['close'], num_trades, note])
+
+    ws_susp = wb.create_sheet("أيام الإيقاف")
+    ws_susp.append(["التاريخ", "السبب (النتيجة)"])
+    for cell in ws_susp[1]: cell.fill = gray_fill; cell.font = Font(bold=True)
+    for d_str, rsn in suspended_days.items():
+        ws_susp.append([d_str, rsn])
 
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
     center_align = Alignment(horizontal='center', vertical='center')
-    for ws in made_sheets:
+
+    for ws in [ws_trades, ws_cycles, ws_susp]:
         for row in ws.iter_rows():
             for cell in row:
                 cell.border = thin_border
                 cell.alignment = center_align
 
-async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
+    from openpyxl.utils import get_column_letter
+    for i in range(1, 11): ws_trades.column_dimensions[get_column_letter(i)].width = 22.0
+    for i in range(1, 6): ws_cycles.column_dimensions[get_column_letter(i)].width = 22.0
+    for i in range(1, 3): ws_susp.column_dimensions[get_column_letter(i)].width = 25.0
+
+    wb.save(fname)
+
+
+async def run_strategy_backtest(start_dt: datetime, end_dt: datetime) -> None:
     global _bt_progress
     bot_state['is_backtesting'] = True
-    fname = f"GannBT_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx"
-    exec_mode = bot_state.get('gann_execution_mode', 'instant')  # hoisted: must exist even if no trades are ever scanned
-    
+    fname = f"StrategyBT_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx"
+
     active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
     if not active_symbols:
         bot_state['is_backtesting'] = False
         return
-        
+
     first_sym_state = bot_state['symbol_state'][active_symbols[0]]
-    
-    enabled_tfs = [tf for tf, on in first_sym_state['gann_monitor_tfs'].items() if on] or ['5m']
-    flt_type = first_sym_state['trend_filter_type']
-    ttf = first_sym_state['trend_timeframe']
-    desc_ttf = ttf.upper()
-    
-    if first_sym_state['gann_entry_mode'] == 'touch_trend':
-        if flt_type == 'vwap': desc_mode = f"Touch(VWAP{first_sym_state['trend_vwap_period']}_{desc_ttf})\n"
-        elif flt_type == 'ema': desc_mode = f"Touch(EMA{first_sym_state['trend_ema_period']}_{desc_ttf})\n"
-        else: desc_mode = f"Touch(VWAP+EMA_{desc_ttf})\n"
-    else:
-        desc_mode = "Pure Touch"
-        
+
+    enabled_tfs = [tf for tf, on in first_sym_state['strategy_monitor_tfs'].items() if on] or ['5m']
+    shift = bot_state.get('signal_candle_shift', 1)
+    desc_mode = f"EMA15/50/150 + Stoch(5,5,5 EMA) | شمعة التقييم: {shift}"
     desc_be = " | 🛡️ BE" if first_sym_state['break_even_enabled'] else ""
-    
-    zf = first_sym_state['gann_zone_filter']
-    if zf == 'star': desc_star = "⭐ الأصلية"
-    elif zf == 'star_fan': desc_star = "⭐🌀 الأصلية والمروحة"
-    else: desc_star = "📋 الكل"
-        
     desc_tfs = "+".join(enabled_tfs)
     syms_label = "+".join(active_symbols)
-    
-    prog = BtProgress(label=f"{syms_label} جان H1→[{desc_tfs}] | {desc_mode} | {desc_star}{desc_be}", active_tfs=['H1']); _bt_progress = prog
+
+    prog = BtProgress(label=f"{syms_label} EMA/Stoch → [{desc_tfs}] | {desc_mode}{desc_be}", active_tfs=enabled_tfs); _bt_progress = prog
     await prog.start(bot_state['chat_id'])
 
     res = {'win': 0, 'loss': 0, 'be': 0, 'total_prof': 0.0, 'total_win_usd': 0.0, 'total_loss_usd': 0.0, 'peak_equity': 0.0, 'max_dd': 0.0, 'trade_logs': [], 'cycle_logs': []}
     _earliest_1m_seen = {}  # {symbol: earliest candle datetime actually fetched} -- used to warn if a long-range request silently got truncated (see fetch_candles hardening)
-    
+
     try:
-        delta_hours = int((end_dt - start_dt).total_seconds() / 3600)
-        
         # PHASE 1: Data Gathering & Signal Generation
         all_signals = []
         all_candles_events = []
-        
+
         for symbol in active_symbols:
             sym_state = bot_state['symbol_state'][symbol]
-            cycle_h = sym_state['gann_cycle_hours']; tpsl_mode = sym_state['gann_tpsl_mode']
-            pv  = SYMBOL_INFO[symbol]['pip_value']; lot = sym_state['lot_size']; margin = sym_state['gann_touch_margin_pts'] * pv
-            cs  = SYMBOL_INFO[symbol]['contract_size'];
-            prec = SYMBOL_INFO[symbol]['prec'];
-            
+            tpsl_mode = sym_state['strategy_tpsl_mode']
+            pv  = SYMBOL_INFO[symbol]['pip_value']; lot = sym_state['lot_size']
+            cs  = SYMBOL_INFO[symbol]['contract_size']
+            prec = SYMBOL_INFO[symbol]['prec']
+
             quote = symbol.split('_')[1] if '_' in symbol else 'USD'
             _QUOTE_RATES = {'USD': 1.0, 'JPY': 1/150.0, 'AUD': 0.66, 'NZD': 0.61, 'EUR': 1.08, 'GBP': 1.27, 'CAD': 0.73, 'CHF': 1.11}
             quote_conv = _QUOTE_RATES.get(quote)
@@ -3634,36 +3033,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 c_log(f"WARNING: unknown quote currency '{quote}' in {symbol} — quote_conv defaulted to 1.0, PnL may be incorrect")
                 quote_conv = 1.0
 
-            await prog.set_phase(f'جلب بيانات الترند ({desc_ttf})...')
-            max_period = max(sym_state['trend_vwap_period'], sym_state['trend_ema_period'], 100)
-            trend_count = (delta_hours * (2 if ttf == '30m' else 1)) + max_period + 10
-            candles_trend = await fetch_candles(symbol, ttf, count=trend_count, end_time=end_dt)
-            if not candles_trend: continue
-
-            df_trend = pd.DataFrame(candles_trend)
-            if flt_type == 'vwap':
-                p_vwap = sym_state['trend_vwap_period']
-                df_trend['Typical_Price'] = (df_trend['high'] + df_trend['low'] + df_trend['close']) / 3
-                df_trend['VWAP'] = (df_trend['Typical_Price'] * df_trend['volume']).rolling(window=p_vwap).sum() / df_trend['volume'].rolling(window=p_vwap).sum()
-            if flt_type == 'ema':
-                p_ema = sym_state['trend_ema_period']
-                df_trend['EMA'] = df_trend['close'].ewm(span=p_ema, adjust=False).mean()
-
-            df_trend.set_index('time', inplace=True)
-            if flt_type == 'vwap': df_trend['macro_trend_up'] = df_trend['close'] > df_trend['VWAP']
-            elif flt_type == 'ema': df_trend['macro_trend_up'] = df_trend['close'] > df_trend['EMA']
-            elif flt_type == 'both':
-                c1_up = df_trend['close'] > df_trend['VWAP']; c2_up = df_trend['close'] > df_trend['EMA']
-                c1_dn = df_trend['close'] < df_trend['VWAP']; c2_dn = df_trend['close'] < df_trend['EMA']
-                df_trend['macro_trend_up'] = np.where(c1_up & c2_up, True, np.where(c1_dn & c2_dn, False, None))
-
-            anchor_gran = bot_state.get('gann_anchor_tf', '1h')
-            await prog.set_phase(f'جلب بيانات {_anchor_label()}...')
-            candles_h1 = await fetch_candles(symbol, anchor_gran, count=(delta_hours // _anchor_hours()) + 10, end_time=end_dt)
-            if not candles_h1: continue
-
-            await prog.set_phase('جلب شموع الفريمات الصغيرة...')
-            monitor_tfs_data = {}
+            await prog.set_phase('جلب شموع الفريمات...')
             days_diff = (end_dt - start_dt).days or 1
             # Always fetch 1m for high-resolution price tracking during simulation
             need_1m = days_diff * 24 * 60 + 300
@@ -3674,116 +3044,75 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                     all_candles_events.append({'time': c['time'], 'symbol': symbol, 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close']), 'tf': '1m_track'})
 
             for btf in enabled_tfs:
-                bmin = int(''.join(filter(str.isdigit, btf)))
-                if 'h' in btf: bmin *= 60
-                need_m = days_diff * 24 * (60 // max(bmin, 1)) + 300
-                mc = await fetch_candles(symbol, btf, count=need_m, end_time=end_dt)
-                if mc: 
-                    monitor_tfs_data[btf] = sorted(mc, key=lambda c: c['time'])
-                    # We only need to add these to events if they might trigger signals at times not covered by 1m
-                    # But 1m covers everything. Still, let's keep them in events for safety.
-                    for c in mc:
-                        all_candles_events.append({'time': c['time'], 'symbol': symbol, 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close']), 'tf': btf})
-
-            start_ts = start_dt.timestamp(); end_ts = end_dt.timestamp()
-            valid_h1 = [c for c in candles_h1 if start_ts <= (c['time'].timestamp() + 3600) <= end_ts]
-            
-            trend_freq = '30min' if ttf == '30m' else '1h'
-
-            # gann_calculation_mode-aware: static_h1 walks closed anchor
-            # candles (legacy); dynamic_live recomputes every
-            # GANN_DYNAMIC_RECALC_MINUTES off 1m closes -- see
-            # _build_gann_cycle_defs docstring for why this is shared with
-            # run_live_twin_simulation instead of duplicated.
-            cycle_defs = _build_gann_cycle_defs(sym_state, valid_h1, mc_1m)
-
-            for idx, cdef in enumerate(cycle_defs):
                 if prog.cancelled: return
                 await asyncio.sleep(0)
-                t_start = cdef['t_start']
-                t_end   = cdef['t_end']
-                close   = cdef['close']
-                levels = gann_calc_levels(symbol, close)
-                f_mode = sym_state['gann_zone_filter']
-                active_lv = [l for l in levels if l['dir'] != 'ref' and (f_mode == 'all' or (f_mode == 'star' and l['star']) or (f_mode == 'star_fan' and (l['star'] or l['fan'])))]
-                
-                res['cycle_logs'].append({'symbol': symbol, 'time_ts': t_start.timestamp(), 'time_dt': t_start, 'close': close, 'levels': len(active_lv)})
-                
-                level_used = set()
-                exec_mode = bot_state.get('gann_execution_mode', 'instant')
-                spike_limit = bot_state.get('gann_spike_limit_pts', 20) * pv
+                bmin = int(''.join(filter(str.isdigit, btf)))
+                if 'h' in btf: bmin *= 60
+                need_m = days_diff * 24 * (60 // max(bmin, 1)) + STRAT_MIN_CANDLES + 300
+                mc = await fetch_candles(symbol, btf, count=need_m, end_time=end_dt)
+                if not mc:
+                    continue
+                mc = sorted(mc, key=lambda c: c['time'])
+                for c in mc:
+                    all_candles_events.append({'time': c['time'], 'symbol': symbol, 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close']), 'tf': btf})
 
-                for btf, candles_m in monitor_tfs_data.items():
-                    m_window = [c for c in candles_m if t_start <= c['time'] < t_end]
-                    m_before = [c for c in candles_m if c['time'] < t_start]
-                    atr_val  = _gann_atr(m_before, sym_state['gann_atr_period']) if tpsl_mode == 'atr' else None
+                df_full = compute_strategy_indicators(mc)
+                if df_full is None:
+                    continue
 
-                    for bar in m_window:
-                        bar_close = float(bar['close']); bar_time = bar['time']
-                        bar_high = float(bar['high']); bar_low = float(bar['low'])
-                        trend_up = True
-                        if sym_state['gann_entry_mode'] == 'touch_trend':
-                            trend_time = bar_time.floor(trend_freq)
-                            if trend_time in df_trend.index:
-                                val = df_trend.loc[trend_time, 'macro_trend_up']
-                                if isinstance(val, pd.Series): val = val.iloc[-1]
-                                macro_trend_up = None if pd.isna(val) else bool(val)
-                            else: macro_trend_up = None
-                            if macro_trend_up is None: continue
-                            trend_up = macro_trend_up
+                ema15 = df_full['ema15']; ema50 = df_full['ema50']; ema150 = df_full['ema150']
+                kk = df_full['stoch_k']; dd = df_full['stoch_d']
+                k_prev = kk.shift(1); d_prev = dd.shift(1)
+                cross_up = (k_prev <= d_prev) & (kk > dd)
+                cross_down = (k_prev >= d_prev) & (kk < dd)
+                # Zone check on the PRE-cross bar (k_prev/d_prev), matching
+                # evaluate_strategy_signal's live logic -- see its comment.
+                buy_cond = (ema15 > ema50) & (ema50 > ema150) & cross_up & (k_prev <= STRAT_STOCH_BUY_LEVEL) & (d_prev <= STRAT_STOCH_BUY_LEVEL)
+                sell_cond = (ema150 > ema50) & (ema50 > ema15) & cross_down & (k_prev >= STRAT_STOCH_SELL_LEVEL) & (d_prev >= STRAT_STOCH_SELL_LEVEL)
+                buy_cond = buy_cond.fillna(False); sell_cond = sell_cond.fillna(False)
 
-                        if bot_state.get('prot_cycle_inval', True):
-                            inval_pts = bot_state.get('prot_cycle_inval_pts', 200) * pv
-                            if abs(bar_close - close) > inval_pts:
-                                active_lv = [] # Wipe levels for the rest of this cycle on this TF
-                                break
-                                
-                        for lv in active_lv:
-                            k = lv['key']; dir = lv['dir']
-                            is_buy = (dir == 'dn')
-                            if sym_state['gann_entry_mode'] == 'touch_trend':
-                                if is_buy and not trend_up: continue
-                                if not is_buy and trend_up: continue
+                res['cycle_logs'].append({'symbol': symbol, 'time_ts': mc[0]['time'].timestamp(),
+                                           'time_dt': mc[0]['time'], 'close': float(mc[0]['close']), 'levels': int(buy_cond.sum() + sell_cond.sum())})
 
-                            channels = ['touch', 'close', 'hybrid'] if exec_mode == 'all_concurrent' else [
-                                'close' if exec_mode == 'close' else 'hybrid' if exec_mode == 'hybrid' else 'touch']
+                for j in range(1, len(mc)):
+                    is_buy_sig = bool(buy_cond.iloc[j])
+                    is_sell_sig = bool(sell_cond.iloc[j])
+                    if not (is_buy_sig or is_sell_sig):
+                        continue
 
-                            for channel in channels:
-                                base_combo = f'{k}_{btf}' if bot_state.get('prot_allow_multi_tf', True) else k
-                                combo_key = f"{base_combo}_{channel}" if exec_mode == 'all_concurrent' else base_combo
-                                if combo_key in level_used: continue
+                    fire_idx = j + shift  # index of the bar during which the live scanner would actually detect + act on this signal
+                    if fire_idx >= len(mc):
+                        continue  # not enough forward data in this window to know the fire time
+                    bar_time = mc[fire_idx]['time']
+                    if not (start_dt <= bar_time < end_dt):
+                        continue
 
-                                if channel == 'close':
-                                    if abs(bar_close - lv['price']) > margin: continue
-                                elif channel == 'hybrid':
-                                    if not (bar_low - margin <= lv['price'] <= bar_high + margin): continue
-                                    if abs(bar_close - lv['price']) > spike_limit: continue
-                                else:  # touch (instant): any part of the bar's range counts (intrabar touch)
-                                    if not (bar_low - margin <= lv['price'] <= bar_high + margin): continue
+                    is_buy = is_buy_sig
+                    entry = float(mc[j]['close'])
 
-                                entry = lv['price']
-                                be_trigger_px = None
-                                if sym_state['break_even_enabled']:
-                                    be_trigger_px = 'dynamic'
+                    tf_tp = _strategy_tf_tp(symbol, btf); tf_sl = _strategy_tf_sl(symbol, btf)
+                    if tpsl_mode == 'atr':
+                        atr_val = _strategy_atr(mc[:j + 1], sym_state['strategy_atr_period'])
+                        if not atr_val:
+                            atr_val = tf_sl * pv
+                        sl_d = atr_val * sym_state['strategy_atr_sl_mult']
+                        tp_d = atr_val * sym_state['strategy_atr_tp_mult']
+                    else:
+                        sl_d = tf_sl * pv; tp_d = tf_tp * pv
 
-                                tf_tp = _gann_tf_tp(symbol, btf); tf_sl = _gann_tf_sl(symbol, btf)
-                                if tpsl_mode == 'atr' and atr_val:
-                                    sl_d = atr_val * sym_state['gann_atr_sl_mult']
-                                    tp_d = atr_val * sym_state['gann_atr_tp_mult']
-                                else:
-                                    sl_d = tf_sl * pv; tp_d = tf_tp * pv
+                    tp_px = entry + tp_d if is_buy else entry - tp_d
+                    sl_px = entry - sl_d if is_buy else entry + sl_d
 
-                                tp_px = entry + tp_d if is_buy else entry - tp_d
-                                sl_px = entry - sl_d if is_buy else entry + sl_d
+                    all_signals.append({
+                        'time': bar_time, 'symbol': symbol, 'is_buy': is_buy, 'entry': entry,
+                        'tp_px': tp_px, 'sl_px': sl_px, 'sl_d': sl_d, 'tp_d': tp_d,
+                        'be_trigger_px': 'dynamic' if sym_state['break_even_enabled'] else None,
+                        'lot': lot, 'cs': cs, 'quote_conv': quote_conv, 'tf': btf,
+                        'combo_key': f"{btf}_{mc[j]['time'].isoformat()}",
+                        'cycle_time': mc[j]['time'], 'cycle_close': entry, 'level_key': f"EMA/Stoch[{btf}]",
+                        'trigger_type': 'candle_close',
+                    })
 
-                                all_signals.append({
-                                    'time': bar_time, 'symbol': symbol, 'is_buy': is_buy, 'entry': entry,
-                                    'tp_px': tp_px, 'sl_px': sl_px, 'sl_d': sl_d, 'tp_d': tp_d, 'be_trigger_px': be_trigger_px,
-                                    'lot': lot, 'cs': cs, 'quote_conv': quote_conv, 'tf': btf, 'combo_key': combo_key,
-                                    'cycle_time': t_start, 'cycle_close': close, 'level_key': k, 'trigger_type': channel,
-                                })
-                                level_used.add(combo_key)
-        
         # PHASE 2: Chronological Event-Driven Simulation
         await prog.set_phase('محاكاة الصفقات الزمنية (تقييم الأرباح العائمة)...')
         c_log(f'BT: Sorting {len(all_signals)} signals')
@@ -3886,8 +3215,8 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                     closed = False
                     tp_dist = abs(tp_px - entry)
                     pv = SYMBOL_INFO[sym]['pip_value']
-                    be_pts = sym_state.get('gann_be_trigger_points', 40)
-                    atr_per = sym_state.get('gann_atr_period', 14)
+                    be_pts = sym_state.get('strategy_be_trigger_points', 40)
+                    atr_per = sym_state.get('strategy_atr_period', 14)
                     cost_be = bot_state.get('prot_cost_be', True)
                     
                     if not tr['be_activated'] and be_trigger_px is not None:
@@ -3935,7 +3264,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 if current_day not in suspended_days:
                     # DAM time-window filter (07:00-09:00, 13:00-14:00) --
                     # this backtest engine has its own signal-admission
-                    # path and never calls is_trading_allowed()/_gann_open_
+                    # path and never calls is_trading_allowed()/_strategy_open_
                     # trade (that gate only exists in the live engine), so
                     # the filter has to be re-applied here explicitly,
                     # checked against the SIGNAL's own historical
@@ -3978,7 +3307,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 'وقت الصفقة (DAM)': _utc_to_dam(tr['time']).strftime('%Y-%m-%d %H:%M'),
                 'TF': tr['tf'], 
                 'اتجاه': dir_str, 
-                'المستوى (الدخول)': f"{tr['entry']:.2f} ({tr['level_key']})",
+                'الدخول (الإشارة)': f"{tr['entry']:.2f} ({tr['level_key']})",
                 'الهدف (TP)': round(tr['tp_px'], 2),
                 'الوقف (SL)': round(tr['sl_px'], 2),
                 'النتيجة': tr['outcome'], 
@@ -4013,8 +3342,8 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
         c_log('BT: Generating Excel')
         
         sum_text = (
-            f"<b>باكتيست جان اكتمل ✅</b>\n"
-            f"{syms_label} H1→[{desc_tfs}] | {desc_mode} | {desc_star}{desc_be}\n"
+            f"<b>باكتيست الاستراتيجية اكتمل ✅</b>\n"
+            f"{syms_label} H1→[{desc_tfs}] | {desc_mode}{desc_be}\n"
             f"{start_dt.strftime('%Y-%m-%d')} → {end_dt.strftime('%Y-%m-%d')}\n\n"
             f"Net: {'PROFIT ▲' if res['total_prof']>=0 else 'LOSS ▼'} ${round(res['total_prof'], 2)}\n"
             f"Win:  +${round(res['total_win_usd'], 2)} ({res['win']})\n"
@@ -4049,97 +3378,17 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 
         sum_text += f"\nدورات H1: {len(res['cycle_logs'])}  |  TP/SL: {str('ATR' if tpsl_mode=='atr' else 'نقاط ثابتة')} | Lot: {lot}"
 
-        wb = openpyxl.Workbook()
-        ws_trades = wb.active
-        ws_trades.title = "الصفقات"
-        
-        headers = ["الزوج", "وقت الصفقة (DAM)", "TF", "اتجاه", "المستوى (الدخول)", "الهدف (TP)", "الوقف (SL)", "النتيجة", "ربح ($)", "رصيد تراكمي ($)"]
-        ws_trades.append(headers)
-        
-        gray_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
-        header_fill = PatternFill(start_color="E2E3E5", end_color="E2E3E5", fill_type="solid")
-        red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-        green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-        be_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
-        
-        for cell in ws_trades[1]:
-            cell.fill = gray_fill
-            cell.font = Font(bold=True)
-            
-        current_cycle = None
-        for tr in res['trade_logs']:
-            if tr['cycle_ts'] != current_cycle:
-                current_cycle = tr['cycle_ts']
-                ws_trades.append([f"دورة {_anchor_label()}: {tr['cycle_time_str']}  |  إغلاق {_anchor_label()}: {tr['cycle_close']:.2f}"] + [""]*9)
-                row_idx = ws_trades.max_row
-                ws_trades.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=10)
-                ws_trades.cell(row=row_idx, column=1).fill = header_fill
-                ws_trades.cell(row=row_idx, column=1).font = Font(bold=True)
-                
-            _OUTCOME_DISPLAY = {'WIN': 'WIN ✅', 'LOSS': 'LOSS ❌', 'BREAK_EVEN': 'BREAK_EVEN ⚖️', 'DAILY_LIMIT': 'DAILY_LIMIT ⏹️'}
-            row_data = [
-                tr['الزوج'], tr['وقت الصفقة (DAM)'], tr['TF'], tr['اتجاه'], tr['المستوى (الدخول)'],
-                tr['الهدف (TP)'], tr['الوقف (SL)'], _OUTCOME_DISPLAY.get(tr['النتيجة'], tr['النتيجة']), tr['ربح ($)'], tr['رصيد تراكمي ($)']
-            ]
-            ws_trades.append(row_data)
-            row_idx = ws_trades.max_row
-            
-            fill = None
-            if tr['النتيجة'] == 'WIN': fill = green_fill
-            elif tr['النتيجة'] == 'LOSS': fill = red_fill
-            elif tr['النتيجة'] == 'BREAK_EVEN': fill = be_fill
-            
-            if fill:
-                for col in range(1, 11):
-                    ws_trades.cell(row=row_idx, column=col).fill = fill
+        # NOTE: building/styling the workbook cell-by-cell is CPU-bound
+        # synchronous work. Running it inline here would block the asyncio
+        # event loop for the whole duration (can be seconds on a large
+        # backtest) -- and that is exactly what starves
+        # oanda_live_price_poller long enough to trip the >60s stale-feed
+        # watchdog. So the whole build+save step is pushed to a worker
+        # thread via asyncio.to_thread and the loop stays free to keep
+        # polling OANDA while it runs.
+        await asyncio.to_thread(_build_strategy_bt_excel, fname, res, suspend_trigger_time, suspended_days)
 
-        ws_cycles = wb.create_sheet("دورات H1")
-        ws_cycles.append(["الزوج", "الدورة (DAM)", f"إغلاق {_anchor_label()}", "عدد الصفقات", "ملاحظة"])
-        for cell in ws_cycles[1]: cell.fill = gray_fill; cell.font = Font(bold=True)
-        
-        for cycle in res['cycle_logs']:
-            num_trades = len([t for t in res['trade_logs'] if t['cycle_ts'] == cycle['time_ts']])
-            cycle_day = _utc_to_dam(cycle['time_dt']).strftime('%Y-%m-%d')
-            if num_trades > 0:
-                note = f"تم تنفيذ {num_trades} صفقة"
-            elif cycle_day in suspend_trigger_time and cycle['time_dt'] >= suspend_trigger_time[cycle_day]:
-                # Distinguish "day was already halted by capital protection"
-                # from "price genuinely never reached a level" -- these are
-                # very different situations and were previously reported
-                # identically, which made it look like the strategy just
-                # wasn't triggering when actually trading had stopped.
-                note = "🛑 اليوم متوقف (تم تفعيل حماية رأس المال مسبقاً)"
-            else:
-                note = "لم يلمس السعر أي مستوى"
-            ws_cycles.append([cycle['symbol'], _utc_to_dam(cycle['time_dt']).strftime('%Y-%m-%d %H:%M'), cycle['close'], num_trades, note])
-            
-        ws_susp = wb.create_sheet("أيام الإيقاف")
-        ws_susp.append(["التاريخ", "السبب (النتيجة)"])
-        for cell in ws_susp[1]: cell.fill = gray_fill; cell.font = Font(bold=True)
-        for d_str, rsn in suspended_days.items():
-            ws_susp.append([d_str, rsn])
-            
-
-        thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-        center_align = Alignment(horizontal='center', vertical='center')
-
-        for ws in [ws_trades, ws_cycles, ws_susp]:
-            for row in ws.iter_rows():
-                for cell in row:
-                    cell.border = thin_border
-                    cell.alignment = center_align
-
-        from openpyxl.utils import get_column_letter
-        for i in range(1, 11): ws_trades.column_dimensions[get_column_letter(i)].width = 22.0
-        for i in range(1, 6): ws_cycles.column_dimensions[get_column_letter(i)].width = 22.0
-        for i in range(1, 3): ws_susp.column_dimensions[get_column_letter(i)].width = 25.0
-
-        if exec_mode == 'all_concurrent':
-            _add_concurrent_analysis_sheets(wb, res['trade_logs'], pnl_key='ربح ($)', outcome_key='النتيجة')
-
-        wb.save(fname)
-        
-        await prog.done(f'<b>باكتيست جان اكتمل ✅</b>\n{syms_label} — {len(res["trade_logs"])} صفقة\nجاري إرسال التقرير والملف...')
+        await prog.done(f'<b>باكتيست الاستراتيجية اكتمل ✅</b>\n{syms_label} — {len(res["trade_logs"])} صفقة\nجاري إرسال التقرير والملف...')
         await send_tg_document(fname, sum_text)
         os.remove(fname)
 
@@ -4155,7 +3404,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 # ═════════════════════════════════════════════════════════════
 # LIVE-TWIN ENGINE — realistic execution simulator
 # ═════════════════════════════════════════════════════════════
-# Replaces run_gann_backtest's zero-friction assumption (perfect fill
+# Replaces run_strategy_backtest's zero-friction assumption (perfect fill
 # at the exact level price, no cost, no ambiguity about which of
 # SL/TP was touched first) with a market-friction model: dynamic
 # spread, asymmetric slippage, signal-to-fill latency, commission/
@@ -4165,7 +3414,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 # or the best every time is its own bias, so we reconstruct a
 # plausible-but-randomized path instead).
 #
-# run_gann_backtest is left completely untouched and reachable from
+# run_strategy_backtest is left completely untouched and reachable from
 # its own menu -- with lt_mode == 'idealized' this engine calls it
 # directly, so it doubles as the zero-friction A/B baseline.
 #
@@ -4269,20 +3518,50 @@ def _lt_latency_shift(path: np.ndarray, steps: int, rng: random.Random) -> float
     return float(path[idx] * (1.0 - t) + path[idx + 1] * t)
 
 
+def _build_live_twin_excel(fname: str, res: dict) -> None:
+    """Pure sync workbook build for run_live_twin_simulation's report --
+    see _build_strategy_bt_excel's docstring; run via asyncio.to_thread."""
+    wb = openpyxl.Workbook()
+    ws = wb.active; ws.title = "Live-Twin Trades"
+    headers = ["الزوج", "وقت الصفقة (DAM)", "TF", "اتجاه", "الدخول الفعلي", "TP", "SL", "النتيجة", "ربح صافي ($)", "رصيد تراكمي ($)"]
+    ws.append(headers)
+    gray_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+    be_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
+    for cell in ws[1]: cell.fill = gray_fill; cell.font = Font(bold=True)
+    for t_log in res['trade_logs']:
+        row = [t_log['الزوج'], t_log['وقت الصفقة (DAM)'], t_log['TF'], t_log['اتجاه'], t_log['المستوى (الدخول الفعلي)'],
+               t_log['الهدف (TP)'], t_log['الوقف (SL)'], t_log['النتيجة'], t_log['ربح صافي ($)'], t_log['رصيد تراكمي ($)']]
+        ws.append(row)
+        fill = {'WIN': green_fill, 'LOSS': red_fill, 'BREAK_EVEN': be_fill}.get(t_log['النتيجة'])
+        if fill:
+            for col in range(1, 11): ws.cell(row=ws.max_row, column=col).fill = fill
+
+    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+    center_align = Alignment(horizontal='center', vertical='center')
+    for row in ws.iter_rows():
+        for cell in row: cell.border = thin_border; cell.alignment = center_align
+    from openpyxl.utils import get_column_letter
+    for i in range(1, 11): ws.column_dimensions[get_column_letter(i)].width = 22.0
+
+    wb.save(fname)
+
+
 async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None:
-    """Realistic-execution counterpart to run_gann_backtest. Same signal
-    logic (Gann level touches + trend filter), but fills, spreads,
-    slippage, latency, commission, swap, and SL/TP ordering are all run
-    through the friction model above instead of assumed perfect."""
+    """Realistic-execution counterpart to run_strategy_backtest. Same signal
+    logic (EMA 15/50/150 stack + Stochastic 5/5/5 EMA-smoothed crossover,
+    evaluated on candle close), but fills, spreads, slippage, latency,
+    commission, swap, and SL/TP ordering are all run through the friction
+    model above instead of assumed perfect."""
     global _lt_progress
     if bot_state.get('lt_mode') == 'idealized':
         # A/B baseline: reuse the existing zero-friction engine untouched.
-        await run_gann_backtest(start_dt, end_dt)
+        await run_strategy_backtest(start_dt, end_dt)
         return
 
     bot_state['is_live_twin_running'] = True
     fname = f"LiveTwin_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx"
-    exec_mode = bot_state.get('gann_execution_mode', 'instant')  # hoisted: must exist even if no trades are ever scanned
     fric = bot_state['lt_friction']
     base_spread = float(bot_state['lt_base_spread_usd'])
     comm_per_lot = float(bot_state['lt_commission_per_lot'])
@@ -4296,30 +3575,26 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
         bot_state['is_live_twin_running'] = False
         return
 
-    # Deterministic seed: identical config (symbols + date range + exec mode +
-    # friction toggles) => identical random slippage/latency/rejection draws
-    # every run. Before this, rng = random.Random() re-seeded from system
-    # entropy/time on every call, so re-running the SAME backtest with NO
-    # settings changed could still swing net P&L wildly (pure noise, not signal)
-    # -- that alone can dwarf real differences between exec modes or code fixes.
-    # Set bot_state['lt_seed'] to an int to override; None keeps this auto-seed.
+    # Deterministic seed: identical config (symbols + date range + strategy
+    # settings + friction toggles) => identical random slippage/latency/
+    # rejection draws every run. Set bot_state['lt_seed'] to an int to
+    # override; None keeps this auto-seed.
     override_seed = bot_state.get('lt_seed')
     if override_seed is not None:
         seed_val = int(override_seed)
     else:
         seed_key = (tuple(sorted(active_symbols)), start_dt.isoformat(), end_dt.isoformat(),
-                    bot_state.get('gann_execution_mode', 'instant'), tuple(sorted(fric.items())))
+                    bot_state.get('signal_candle_shift', 1), tuple(sorted(fric.items())))
         seed_val = zlib.crc32(str(seed_key).encode())
     rng = random.Random(seed_val)
 
     first_sym_state = bot_state['symbol_state'][active_symbols[0]]
-    enabled_tfs = [tf for tf, on in first_sym_state['gann_monitor_tfs'].items() if on] or ['5m']
-    flt_type = first_sym_state['trend_filter_type']
-    ttf = first_sym_state['trend_timeframe']
+    enabled_tfs = [tf for tf, on in first_sym_state['strategy_monitor_tfs'].items() if on] or ['5m']
+    shift = bot_state.get('signal_candle_shift', 1)
     syms_label = "+".join(active_symbols)
     on_tags = "+".join(k for k, v in fric.items() if v) or "none"
 
-    prog = BtProgress(label=f"Live-Twin {syms_label} | friction:[{on_tags}]", active_tfs=['H1'])
+    prog = BtProgress(label=f"Live-Twin {syms_label} | friction:[{on_tags}]", active_tfs=enabled_tfs)
     _lt_progress = prog
     await prog.start(bot_state['chat_id'])
 
@@ -4329,15 +3604,14 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
     _earliest_1m_seen = {}  # {symbol: earliest candle datetime actually fetched} -- see fetch_candles hardening comment
 
     try:
-        delta_hours = int((end_dt - start_dt).total_seconds() / 3600)
         all_signals = []
         m1_by_symbol = {}
 
         # ── PHASE 1: signal generation (identical strategy logic to the idealized engine) ──
         for symbol in active_symbols:
             sym_state = bot_state['symbol_state'][symbol]
-            cycle_h = sym_state['gann_cycle_hours']; tpsl_mode = sym_state['gann_tpsl_mode']
-            pv = SYMBOL_INFO[symbol]['pip_value']; lot = sym_state['lot_size']; margin = sym_state['gann_touch_margin_pts'] * pv
+            tpsl_mode = sym_state['strategy_tpsl_mode']
+            pv = SYMBOL_INFO[symbol]['pip_value']; lot = sym_state['lot_size']
             cs = SYMBOL_INFO[symbol]['contract_size']
 
             quote = symbol.split('_')[1] if '_' in symbol else 'USD'
@@ -4347,34 +3621,6 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
                 c_log(f"WARNING: unknown quote currency '{quote}' in {symbol} — quote_conv defaulted to 1.0, PnL may be incorrect")
                 quote_conv = 1.0
 
-            await prog.set_phase(f'جلب بيانات الترند ({ttf.upper()})...')
-            max_period = max(sym_state['trend_vwap_period'], sym_state['trend_ema_period'], 100)
-            trend_count = (delta_hours * (2 if ttf == '30m' else 1)) + max_period + 10
-            candles_trend = await fetch_candles(symbol, ttf, count=trend_count, end_time=end_dt)
-            if not candles_trend: continue
-
-            df_trend = pd.DataFrame(candles_trend)
-            if flt_type == 'vwap':
-                p_vwap = sym_state['trend_vwap_period']
-                df_trend['Typical_Price'] = (df_trend['high'] + df_trend['low'] + df_trend['close']) / 3
-                df_trend['VWAP'] = (df_trend['Typical_Price'] * df_trend['volume']).rolling(window=p_vwap).sum() / df_trend['volume'].rolling(window=p_vwap).sum()
-            if flt_type == 'ema':
-                p_ema = sym_state['trend_ema_period']
-                df_trend['EMA'] = df_trend['close'].ewm(span=p_ema, adjust=False).mean()
-
-            df_trend.set_index('time', inplace=True)
-            if flt_type == 'vwap': df_trend['macro_trend_up'] = df_trend['close'] > df_trend['VWAP']
-            elif flt_type == 'ema': df_trend['macro_trend_up'] = df_trend['close'] > df_trend['EMA']
-            elif flt_type == 'both':
-                c1_up = df_trend['close'] > df_trend['VWAP']; c2_up = df_trend['close'] > df_trend['EMA']
-                c1_dn = df_trend['close'] < df_trend['VWAP']; c2_dn = df_trend['close'] < df_trend['EMA']
-                df_trend['macro_trend_up'] = np.where(c1_up & c2_up, True, np.where(c1_dn & c2_dn, False, None))
-
-            anchor_gran = bot_state.get('gann_anchor_tf', '1h')
-            await prog.set_phase(f'جلب بيانات {_anchor_label()}...')
-            candles_h1 = await fetch_candles(symbol, anchor_gran, count=(delta_hours // _anchor_hours()) + 10, end_time=end_dt)
-            if not candles_h1: continue
-
             await prog.set_phase('جلب شموع الدقيقة الواحدة (تنفيذ واقعي)...')
             days_diff = (end_dt - start_dt).days or 1
             need_1m = days_diff * 24 * 60 + 300
@@ -4383,120 +3629,69 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
             _earliest_1m_seen[symbol] = min(c['time'] for c in mc_1m)
             m1_by_symbol[symbol] = sorted(mc_1m, key=lambda c: c['time'])
 
-            monitor_tfs_data = {}
+            await prog.set_phase('جلب شموع الفريمات...')
             for btf in enabled_tfs:
-                bmin = int(''.join(filter(str.isdigit, btf))); bmin = bmin * 60 if 'h' in btf else bmin
-                need_m = days_diff * 24 * (60 // max(bmin, 1)) + 300
-                mc = await fetch_candles(symbol, btf, count=need_m, end_time=end_dt)
-                if mc: monitor_tfs_data[btf] = sorted(mc, key=lambda c: c['time'])
-
-            start_ts = start_dt.timestamp(); end_ts = end_dt.timestamp()
-            valid_h1 = [c for c in candles_h1 if start_ts <= (c['time'].timestamp() + 3600) <= end_ts]
-            trend_freq = '30min' if ttf == '30m' else '1h'
-
-            # Same shared builder as run_gann_backtest -- required so a
-            # 'dynamic_live' backtest here matches the idealized engine and
-            # the live scanner exactly instead of drifting from them.
-            cycle_defs = _build_gann_cycle_defs(sym_state, valid_h1, mc_1m)
-
-            for cdef in cycle_defs:
                 if prog.cancelled: return
                 await asyncio.sleep(0)
-                t_start = cdef['t_start']
-                t_end = cdef['t_end']
-                close = cdef['close']
-                levels = gann_calc_levels(symbol, close)
-                f_mode = sym_state['gann_zone_filter']
-                active_lv = [l for l in levels if l['dir'] != 'ref' and (f_mode == 'all' or (f_mode == 'star' and l['star']) or (f_mode == 'star_fan' and (l['star'] or l['fan'])))]
-                level_used = set()
+                bmin = int(''.join(filter(str.isdigit, btf))); bmin = bmin * 60 if 'h' in btf else bmin
+                need_m = days_diff * 24 * (60 // max(bmin, 1)) + STRAT_MIN_CANDLES + 300
+                mc = await fetch_candles(symbol, btf, count=need_m, end_time=end_dt)
+                if not mc:
+                    continue
+                mc = sorted(mc, key=lambda c: c['time'])
 
-                for btf, candles_m in monitor_tfs_data.items():
-                    m_window = [c for c in candles_m if t_start <= c['time'] < t_end]
-                    m_before = [c for c in candles_m if c['time'] < t_start]
-                    atr_val = _gann_atr(m_before, sym_state['gann_atr_period']) if tpsl_mode == 'atr' else None
-                    # Execution-mode state: 'prev_bar_close' tracks bar-over-bar
-                    # momentum for hybrid's spike check, since OHLC data has no
-                    # sub-bar tick stream to check live momentum against.
-                    prev_bar_close = float(m_before[-1]['close']) if m_before else None
-                    exec_mode = bot_state.get('gann_execution_mode', 'instant')
-                    spike_limit = bot_state.get('gann_spike_limit_pts', 20) * pv
+                df_full = compute_strategy_indicators(mc)
+                if df_full is None:
+                    continue
 
-                    for bar in m_window:
-                        bar_open = float(bar['open']); bar_close = float(bar['close']); bar_time = bar['time']
-                        bar_high = float(bar['high']); bar_low = float(bar['low'])
-                        trend_up = True
-                        if sym_state['gann_entry_mode'] == 'touch_trend':
-                            trend_time = bar_time.floor(trend_freq)
-                            if trend_time in df_trend.index:
-                                val = df_trend.loc[trend_time, 'macro_trend_up']
-                                if isinstance(val, pd.Series): val = val.iloc[-1]
-                                macro_trend_up = None if pd.isna(val) else bool(val)
-                            else: macro_trend_up = None
-                            if macro_trend_up is None:
-                                prev_bar_close = bar_close; continue
-                            trend_up = macro_trend_up
+                ema15 = df_full['ema15']; ema50 = df_full['ema50']; ema150 = df_full['ema150']
+                kk = df_full['stoch_k']; dd = df_full['stoch_d']
+                k_prev = kk.shift(1); d_prev = dd.shift(1)
+                cross_up = (k_prev <= d_prev) & (kk > dd)
+                cross_down = (k_prev >= d_prev) & (kk < dd)
+                # Zone check on the PRE-cross bar (k_prev/d_prev), matching
+                # evaluate_strategy_signal's live logic -- see its comment.
+                buy_cond = (ema15 > ema50) & (ema50 > ema150) & cross_up & (k_prev <= STRAT_STOCH_BUY_LEVEL) & (d_prev <= STRAT_STOCH_BUY_LEVEL)
+                sell_cond = (ema150 > ema50) & (ema50 > ema15) & cross_down & (k_prev >= STRAT_STOCH_SELL_LEVEL) & (d_prev >= STRAT_STOCH_SELL_LEVEL)
+                buy_cond = buy_cond.fillna(False); sell_cond = sell_cond.fillna(False)
 
-                        if bot_state.get('prot_cycle_inval', True):
-                            inval_pts = bot_state.get('prot_cycle_inval_pts', 200) * pv
-                            if abs(bar_close - close) > inval_pts:
-                                active_lv = []; break
+                for j in range(1, len(mc)):
+                    is_buy_sig = bool(buy_cond.iloc[j])
+                    is_sell_sig = bool(sell_cond.iloc[j])
+                    if not (is_buy_sig or is_sell_sig):
+                        continue
 
-                        for lv in active_lv:
-                            k = lv['key']; dir = lv['dir']
-                            is_buy = (dir == 'dn')
-                            if sym_state['gann_entry_mode'] == 'touch_trend':
-                                if is_buy and not trend_up: continue
-                                if not is_buy and trend_up: continue
+                    fire_idx = j + shift
+                    if fire_idx >= len(mc):
+                        continue
+                    fire_bar = mc[fire_idx]
+                    bar_time = fire_bar['time']
+                    if not (start_dt <= bar_time < end_dt):
+                        continue
 
-                            # ── Execution-mode gate (mirrors the live scanner) ──
-                            # close   : only the bar's CLOSE has to be within margin
-                            #           (this was the engine's only behavior before
-                            #           execution modes existed, and stays the default).
-                            # instant : any part of the bar's range (intrabar high/low,
-                            #           not just its close) touching the level counts --
-                            #           a live tick could have fired mid-bar.
-                            # hybrid  : same intrabar touch as instant, but rejected if
-                            #           this bar's close has already moved more than the
-                            #           spike limit from the PREVIOUS bar's close (the
-                            #           backtest's only available proxy for "live_px ran
-                            #           away from the last print" since OHLC has no
-                            #           sub-bar ticks to check momentum against directly).
-                            # all_concurrent: check all three independently, each with
-                            #           its own dedup key, so a touch/close/hybrid can
-                            #           each fire their own trade on the same level.
-                            channels = ['touch', 'close', 'hybrid'] if exec_mode == 'all_concurrent' else [
-                                'close' if exec_mode == 'close' else 'hybrid' if exec_mode == 'hybrid' else 'touch']
+                    is_buy = is_buy_sig
+                    entry = float(mc[j]['close'])
 
-                            for channel in channels:
-                                base_combo = f'{k}_{btf}' if bot_state.get('prot_allow_multi_tf', True) else k
-                                combo_key = f"{base_combo}_{channel}" if exec_mode == 'all_concurrent' else base_combo
-                                if combo_key in level_used: continue
+                    tf_tp = _strategy_tf_tp(symbol, btf); tf_sl = _strategy_tf_sl(symbol, btf)
+                    if tpsl_mode == 'atr':
+                        atr_val = _strategy_atr(mc[:j + 1], sym_state['strategy_atr_period'])
+                        if not atr_val:
+                            atr_val = tf_sl * pv
+                        sl_d = atr_val * sym_state['strategy_atr_sl_mult']
+                        tp_d = atr_val * sym_state['strategy_atr_tp_mult']
+                    else:
+                        sl_d = tf_sl * pv; tp_d = tf_tp * pv
 
-                                if channel == 'close':
-                                    if abs(bar_close - lv['price']) > margin: continue
-                                elif channel == 'hybrid':
-                                    if not (bar_low - margin <= lv['price'] <= bar_high + margin): continue
-                                    if prev_bar_close is not None and abs(bar_close - prev_bar_close) > spike_limit: continue
-                                else:  # touch (instant)
-                                    if not (bar_low - margin <= lv['price'] <= bar_high + margin): continue
-
-                                entry = lv['price']
-                                tf_tp = _gann_tf_tp(symbol, btf); tf_sl = _gann_tf_sl(symbol, btf)
-                                if tpsl_mode == 'atr' and atr_val:
-                                    sl_d = atr_val * sym_state['gann_atr_sl_mult']; tp_d = atr_val * sym_state['gann_atr_tp_mult']
-                                else:
-                                    sl_d = tf_sl * pv; tp_d = tf_tp * pv
-
-                                all_signals.append({
-                                    'time': bar_time, 'symbol': symbol, 'is_buy': is_buy, 'intended_entry': entry,
-                                    'sl_d': sl_d, 'tp_d': tp_d, 'be_enabled': sym_state['break_even_enabled'],
-                                    'lot': lot, 'cs': cs, 'quote_conv': quote_conv, 'tf': btf, 'combo_key': combo_key,
-                                    'cycle_time': t_start, 'cycle_close': close, 'level_key': k, 'trigger_type': channel,
-                                    'bar_o': bar_open, 'bar_h': bar_high, 'bar_l': bar_low, 'bar_c': bar_close,
-                                })
-                                level_used.add(combo_key)
-
-                        prev_bar_close = bar_close
+                    all_signals.append({
+                        'time': bar_time, 'symbol': symbol, 'is_buy': is_buy, 'intended_entry': entry,
+                        'sl_d': sl_d, 'tp_d': tp_d, 'be_enabled': sym_state['break_even_enabled'],
+                        'lot': lot, 'cs': cs, 'quote_conv': quote_conv, 'tf': btf,
+                        'combo_key': f"{btf}_{mc[j]['time'].isoformat()}",
+                        'cycle_time': mc[j]['time'], 'cycle_close': entry, 'level_key': f"EMA/Stoch[{btf}]",
+                        'trigger_type': 'candle_close',
+                        'bar_o': float(fire_bar['open']), 'bar_h': float(fire_bar['high']),
+                        'bar_l': float(fire_bar['low']), 'bar_c': float(fire_bar['close']),
+                    })
 
         # ── PHASE 2: chronological, friction-aware, 1-minute-bar simulation ──
         await prog.set_phase('محاكاة التنفيذ الواقعي (سبريد/انزلاق/تأخير/عمولة)...')
@@ -4591,9 +3786,9 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
                     # Break-even arm (tested against the bar's favorable extreme, same as before)
                     if tr['be_enabled'] and not tr['be_activated']:
                         test_px = h if is_buy else l
-                        be_pts = bot_state['symbol_state'][sym].get('gann_be_trigger_points', 40)
+                        be_pts = bot_state['symbol_state'][sym].get('strategy_be_trigger_points', 40)
                         pv_sym = SYMBOL_INFO[sym]['pip_value']
-                        atr_per = bot_state['symbol_state'][sym].get('gann_atr_period', 14)
+                        atr_per = bot_state['symbol_state'][sym].get('strategy_atr_period', 14)
                         cost_be = bot_state.get('prot_cost_be', True)
                         net_be = core_eval_break_even(is_buy, entry, test_px, pv_sym, be_pts, atr_per, cost_be)
                         if net_be is not None:
@@ -4760,35 +3955,11 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
             f"{coverage_warning}"
         )
 
-        wb = openpyxl.Workbook()
-        ws = wb.active; ws.title = "Live-Twin Trades"
-        headers = ["الزوج", "وقت الصفقة (DAM)", "TF", "اتجاه", "الدخول الفعلي", "TP", "SL", "النتيجة", "ربح صافي ($)", "رصيد تراكمي ($)"]
-        ws.append(headers)
-        gray_fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
-        red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-        green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-        be_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
-        for cell in ws[1]: cell.fill = gray_fill; cell.font = Font(bold=True)
-        for t_log in res['trade_logs']:
-            row = [t_log['الزوج'], t_log['وقت الصفقة (DAM)'], t_log['TF'], t_log['اتجاه'], t_log['المستوى (الدخول الفعلي)'],
-                   t_log['الهدف (TP)'], t_log['الوقف (SL)'], t_log['النتيجة'], t_log['ربح صافي ($)'], t_log['رصيد تراكمي ($)']]
-            ws.append(row)
-            fill = {'WIN': green_fill, 'LOSS': red_fill, 'BREAK_EVEN': be_fill}.get(t_log['النتيجة'])
-            if fill:
-                for col in range(1, 11): ws.cell(row=ws.max_row, column=col).fill = fill
-
-        thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-        center_align = Alignment(horizontal='center', vertical='center')
-        for row in ws.iter_rows():
-            for cell in row: cell.border = thin_border; cell.alignment = center_align
-        from openpyxl.utils import get_column_letter
-        for i in range(1, 11): ws.column_dimensions[get_column_letter(i)].width = 22.0
-
-        if exec_mode == 'all_concurrent':
-            _add_concurrent_analysis_sheets(wb, res['trade_logs'], pnl_key='ربح صافي ($)',
-                                             outcome_key='النتيجة', slippage_key='انزلاق (نقطة)')
-
-        wb.save(fname)
+        # See _build_strategy_bt_excel's docstring: pushed off the event loop
+        # thread for the same reason -- this used to run inline and could
+        # block the loop long enough to starve oanda_live_price_poller past
+        # its 60s stale-feed threshold.
+        await asyncio.to_thread(_build_live_twin_excel, fname, res)
 
         await prog.done(f'<b>Live-Twin اكتمل ✅</b>\n{syms_label} — {len(res["trade_logs"])} صفقة\nجاري إرسال التقرير...')
         await send_tg_document(fname, sum_text)
@@ -4896,7 +4067,7 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     if d == 'run_diag':
         async def _run_diag_task():
             try:
-                report = await gann_run_diagnostics()
+                report = await strategy_run_diagnostics()
                 # Telegram hard-caps messages at 4096 chars. Split on
                 # double-newline (section) boundaries first; if a section
                 # still exceeds 3500, split on single lines. Never split
@@ -4919,7 +4090,7 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
                 if chunk.strip():
                     await send_tg_msg(chunk)
             except Exception as e:
-                log_exception('gann_run_diagnostics', e)
+                log_exception('strategy_run_diagnostics', e)
                 await send_tg_msg(f"❌ فشل التشخيص: {e}")
         _safe_task(_run_diag_task(), 'run_diag')
         return
@@ -5030,11 +4201,7 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
                 data = {}
 
         # A preset should only ever capture settings, never live runtime
-        # state -- and critically, gann_last_h1_time/gann_cycle_started_at
-        # are live datetime objects once any cycle has run (which is
-        # almost immediately after startup). json.dump() cannot serialize
-        # a raw datetime at all, so saving used to raise TypeError as soon
-        # as this state existed. _PRESET_EXCLUDED_KEYS matches exactly
+        # state (open trades, dedup state, etc). _PRESET_EXCLUDED_KEYS matches exactly
         # what load_preset already refuses to restore, so nothing is lost
         # by leaving them out of what gets saved in the first place.
         data[f'preset_{p_num}'] = {
@@ -5063,7 +4230,7 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
             try:
                 with open(PRESETS_FILE, 'r') as f: data = json.load(f)
                 if f'preset_{p_num}' in data:
-                    # Load settings, but keep live data like open_trades and gann_levels untouched
+                    # Load settings, but keep live data like open_trades untouched
                     for s_name, s_data in data[f'preset_{p_num}'].items():
                         if s_name in bot_state['symbol_state']:
                             for k, v in s_data.items():
@@ -5093,66 +4260,23 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     elif d == 'prot_inc_profit':
         bot_state['prot_daily_profit_usd'] = min(10000, bot_state['prot_daily_profit_usd'] + 50)
         await _show(chat_id, msg_id, 'إعدادات الحماية:', get_protection_keyboard())
-    elif d == 'menu_gann': await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'menu_strategy': await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
     elif d == 'tg_prot_sync': bot_state['prot_true_sync'] = not bot_state.get('prot_true_sync', True); await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
-    elif d == 'tg_prot_inval': bot_state['prot_cycle_inval'] = not bot_state.get('prot_cycle_inval', True); await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
     elif d == 'tg_prot_cost': bot_state['prot_cost_be'] = not bot_state.get('prot_cost_be', True); await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
     elif d == 'tg_prot_stale': bot_state['prot_stale_filter'] = not bot_state.get('prot_stale_filter', True); await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
-    elif d == 'tg_prot_anchor':
-        bot_state['gann_anchor_tf'] = '4h' if bot_state.get('gann_anchor_tf', '1h') == '1h' else '1h'
-        for sym, ss in bot_state['symbol_state'].items():
-            # Force every symbol to recompute its levels from the NEW
-            # anchor timeframe on the very next scanner tick, rather than
-            # waiting for whatever boundary the OLD anchor would have
-            # used next. Without this, "switching to 4h" would silently
-            # keep running on the old H1-derived levels until the current
-            # cycle happened to expire.
-            #
-            # gann_cycle_hours (ladder freeze / monitoring duration) is
-            # intentionally left untouched here -- it stays fully manual,
-            # adjustable via its own +/- buttons (e.g. 1h -> 2h/3h/4h),
-            # independent of whatever the anchor timeframe is set to.
-            ss['gann_last_h1_time'] = None
-            ss['gann_cycle_started_at'] = None
-        await save_bot_persistence()
-        await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
-        await send_tg_msg(
-            f"✅ <b>تم تغيير الإطار المرجعي إلى {_anchor_label()}</b>\n"
-            f"سيتم استخراج مستويات جديدة بالكامل من إغلاق شمعة {_anchor_label()} في التحديث القادم.\n"
-            f"ملاحظة: مدة تجميد السلم (مدة المراقبة) لم تتغيّر — عدّلها يدوياً من أزرارها الخاصة لو حبيت."
-        )
 
     elif d == 'prot_reset_all':
-        # Clears every "stuck until next natural trigger" protection state:
-        # - live_daily_hit: capital-protection daily DD/profit lock (normally
-        #   only clears at midnight broker time)
-        # - per-symbol cycle invalidation from prot_cycle_inval (spike >200pts
-        #   freezes that symbol until its NEXT H1 close -- this forces an
-        #   immediate rebuild instead of waiting)
-        # Does NOT touch gann_level_status (already-used levels this cycle) --
-        # that's a normal trading-logic guard, not a "protection freeze", and
-        # clearing it would let the bot re-enter a level it already traded.
+        # Clears "stuck until next natural trigger" protection state:
+        # live_daily_hit is the capital-protection daily DD/profit lock,
+        # which normally only clears at midnight broker time.
         was_daily_hit = bot_state.get('live_daily_hit', False)
         bot_state['live_daily_hit'] = False
-        frozen_symbols = []
-        for sym, ss in bot_state['symbol_state'].items():
-            if ss.get('gann_close_used') is None and not ss.get('gann_levels'):
-                continue  # wasn't actually frozen
-            frozen_symbols.append(sym)
-            ss['gann_levels'] = []
-            ss['gann_close_used'] = None
-            ss['gann_last_h1_time'] = None
-            ss['gann_cycle_started_at'] = None
         await save_bot_persistence()
         await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
-        summary = []
         if was_daily_hit:
-            summary.append("• قفل حماية رأس المال اليومي (ربح/تراجع) — تم فكّه، الدخول مسموح من الآن")
-        if frozen_symbols:
-            summary.append(f"• تجميد الدورة بسبب انفجار سعري — تم فكّه لـ: {', '.join(frozen_symbols)} (سيُعاد بناء المستويات فوراً)")
-        if not summary:
-            summary.append("لا توجد حمايات نشطة حالياً لتصفيرها — كل شيء طبيعي.")
-        await send_tg_msg("🔄 <b>تصفير الحمايات</b>\n\n" + "\n".join(summary))
+            await send_tg_msg("🔄 <b>تصفير الحمايات</b>\n\n• قفل حماية رأس المال اليومي (ربح/تراجع) — تم فكّه، الدخول مسموح من الآن")
+        else:
+            await send_tg_msg("🔄 <b>تصفير الحمايات</b>\n\nلا توجد حمايات نشطة حالياً لتصفيرها — كل شيء طبيعي.")
 
     elif d == 'tg_prot_dam_time':
         bot_state['prot_dam_time_filter'] = not bot_state.get('prot_dam_time_filter', True)
@@ -5162,204 +4286,137 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         await save_bot_persistence()
         await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
 
-    elif d == 'tg_gann_calc_mode':
-        new_mode = 'static_h1' if bot_state.get('gann_calculation_mode', 'static_h1') == 'dynamic_live' else 'dynamic_live'
-        bot_state['gann_calculation_mode'] = new_mode
-        for sym, ss in bot_state['symbol_state'].items():
-            # Force an immediate recompute on gann_cycle_manager's very next
-            # tick instead of waiting for whatever boundary the OLD mode
-            # would have used next -- matches the anchor-tf toggle's
-            # "revert immediately" behavior.
-            ss['gann_last_h1_time'] = None
-            ss['gann_cycle_started_at'] = None
-        await save_bot_persistence()
-        await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
-        mode_lbl = '⚡ حي (Dynamic Live -- كل 5 دقائق حسب السعر اللحظي)' if new_mode == 'dynamic_live' else '📌 كلاسيكي (Static -- عند إغلاق شمعة الأنكر فقط)'
-        await send_tg_msg(f"✅ <b>وضع حساب جان: {mode_lbl}</b>\nسيتم تطبيق هذا فوراً في الدورة القادمة (~60 ثانية) وفي أي باكتيست جديد.")
+    elif d == 'strategy_show_indicators':
+        sym = bot_state['ui_selected_symbol']
+        enabled_tfs = [tf for tf, on in sym_state['strategy_monitor_tfs'].items() if on]
+        if not enabled_tfs:
+            await send_tg_msg('⚠️ لا يوجد أي فريم مفعّل حالياً.')
+            await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+            return
+        shift = bot_state.get('signal_candle_shift', 1)
+        lines = [f'📉 <b>قيم EMA/Stochastic الحالية — {sym}</b> (شمعة التقييم: {shift})\n']
+        for tf in enabled_tfs:
+            candles = await fetch_candles(sym, tf, count=STRAT_MIN_CANDLES + 20)
+            if not candles:
+                lines.append(f"[{tf}] ❌ تعذّر جلب الشموع.")
+                continue
+            df = compute_strategy_indicators(candles)
+            if df is None:
+                lines.append(f"[{tf}] ⚠️ بيانات غير كافية (يلزم ~{STRAT_MIN_CANDLES} شمعة).")
+                continue
+            idx = len(df) - 1 - shift
+            ema15, ema50, ema150 = df['ema15'].iloc[idx], df['ema50'].iloc[idx], df['ema150'].iloc[idx]
+            k, d_ = df['stoch_k'].iloc[idx], df['stoch_d'].iloc[idx]
+            stack = 'صاعد ⬆️' if ema15 > ema50 > ema150 else ('هابط ⬇️' if ema150 > ema50 > ema15 else 'غير مصطف')
+            lines.append(f"[{tf}] EMA15={ema15:.2f} EMA50={ema50:.2f} EMA150={ema150:.2f} ({stack}) | Stoch %K={k:.1f} %D={d_:.1f}")
+        await send_tg_msg('\n'.join(lines))
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
 
-    elif d == 'gann_show_levels':
+    elif d == 'strategy_show_last10':
         sym = bot_state['ui_selected_symbol']
-        if not bot_state['symbol_state'][sym]['gann_levels'] or not bot_state['symbol_state'][sym]['gann_close_used']:
-            await send_tg_msg(f'⏳ لا يوجد سلّم نشط لـ {sym}، جاري جلب آخر شمعة H1...')
-            last_h1 = await _gann_fetch_last_closed_anchor(sym)
-            if last_h1:
-                h1_close = float(last_h1['close'])
-                bot_state['symbol_state'][sym]['gann_levels']          = gann_calc_levels(sym, h1_close)
-                bot_state['symbol_state'][sym]['gann_close_used']       = h1_close
-                bot_state['symbol_state'][sym]['gann_last_h1_time']     = last_h1['time']
-                bot_state['symbol_state'][sym]['gann_cycle_started_at'] = datetime.now(timezone.utc)
-                bot_state['symbol_state'][sym]['gann_cycle_active']     = True
-            else:
-                await send_tg_msg('❌ تعذّر جلب البيانات.'); return
-        await send_tg_msg(_gann_fmt_levels_msg(sym, bot_state['symbol_state'][sym]['gann_close_used']))
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_show_last10':
-        sym = bot_state['ui_selected_symbol']
-        anchor_tf = bot_state.get('gann_anchor_tf', '1h')
-        anchor_hours = _anchor_hours()
+        enabled_tfs = [tf for tf, on in sym_state['strategy_monitor_tfs'].items() if on]
+        tf = enabled_tfs[0] if enabled_tfs else '15m'
         offset = bot_state.get('broker_time_offset', 3)
-        await send_tg_msg(f'⏳ جاري جلب آخر 10 شموع {_anchor_label()} لـ {sym} من اواندا...')
-        candles = await fetch_candles(sym, anchor_tf, count=10)
+        await send_tg_msg(f'⏳ جاري جلب آخر 10 شموع {tf} لـ {sym} من اواندا...')
+        candles = await fetch_candles(sym, tf, count=10)
         if not candles:
             await send_tg_msg('❌ تعذّر جلب الشموع.')
             return
         candles = sorted(candles, key=lambda c: c['time'])[-10:]
-        # What the bot itself currently treats as "last closed" -- shown
-        # separately so a mismatch between this and the chart is obvious.
-        bot_pick = await _gann_fetch_last_closed_anchor(sym)
-        bot_pick_time = bot_pick['time'] if bot_pick else None
-
         lines = [
-            f'🕯️ <b>آخر 10 شموع {_anchor_label()} — {sym}</b>',
+            f'🕯️ <b>آخر 10 شموع {tf} — {sym}</b>',
             f'(المصدر: OANDA | التوقيت المعروض: دمشق UTC+{offset} — وبين قوسين UTC الخام)',
             ''
         ]
         for i, c in enumerate(candles, 1):
             t_utc = c['time'].to_pydatetime()
-            t_dam_start = t_utc + timedelta(hours=offset)
-            t_dam_end = t_dam_start + timedelta(hours=anchor_hours)
-            t_utc_end = t_utc + timedelta(hours=anchor_hours)
-            marker = ' ✅ ← يعتمدها البوت الآن' if bot_pick_time and t_utc == bot_pick_time else ''
-            lines.append(
-                f"{i}) {t_dam_start.strftime('%m-%d %H:%M')} → {t_dam_end.strftime('%H:%M')} دمشق  "
-                f"({t_utc.strftime('%H:%M')}-{t_utc_end.strftime('%H:%M')} UTC)\n"
-                f"    إغلاق: {float(c['close']):.5f}{marker}"
-            )
-        if not bot_pick_time:
-            lines.append('\n⚠️ لم يتمكن البوت من تحديد آخر شمعة مغلقة حالياً.')
+            t_dam = t_utc + timedelta(hours=offset)
+            lines.append(f"{i}) {t_dam.strftime('%m-%d %H:%M')} دمشق ({t_utc.strftime('%H:%M')} UTC)  |  إغلاق: {float(c['close']):.5f}")
         await send_tg_msg('\n'.join(lines))
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_toggle_entry':
-        sym_state['gann_entry_mode'] = 'pure_touch' if sym_state['gann_entry_mode'] == 'touch_trend' else 'touch_trend'
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_toggle_filter':
-        current = sym_state['gann_zone_filter']
-        if current == 'star': sym_state['gann_zone_filter'] = 'star_fan'
-        elif current == 'star_fan': sym_state['gann_zone_filter'] = 'all'
-        else: sym_state['gann_zone_filter'] = 'star'
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_toggle_filter_type':
-        current = sym_state['trend_filter_type']
-        if current == 'vwap': sym_state['trend_filter_type'] = 'ema'
-        else: sym_state['trend_filter_type'] = 'vwap'
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_toggle_exec_mode':
-        order = ['instant', 'close', 'hybrid', 'all_concurrent']
-        current = bot_state.get('gann_execution_mode', 'instant')
-        bot_state['gann_execution_mode'] = order[(order.index(current) + 1) % len(order)]
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_toggle_auto_trade':
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+
+    elif d == 'strategy_toggle_candle_shift':
+        bot_state['signal_candle_shift'] = (bot_state.get('signal_candle_shift', 1) + 1) % 3
+        await save_bot_persistence()
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_toggle_concurrent':
+        bot_state['allow_concurrent_trades'] = not bot_state.get('allow_concurrent_trades', False)
+        await save_bot_persistence()
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_toggle_auto_trade':
         sym_state['auto_trade'] = not sym_state.get('auto_trade', False)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_toggle_ttf':
-        sym_state['trend_timeframe'] = '30m' if sym_state['trend_timeframe'] == '1h' else '1h'
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_toggle_be':
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_toggle_be':
         sym_state['break_even_enabled'] = not sym_state['break_even_enabled']
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_be_pts':
-        sym_state['gann_be_trigger_points'] = max(10, sym_state.get('gann_be_trigger_points', 40) - 10)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_be_pts':
-        sym_state['gann_be_trigger_points'] = min(200, sym_state.get('gann_be_trigger_points', 40) + 10)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_vwap': 
-        sym_state['trend_vwap_period'] = max(10, sym_state['trend_vwap_period'] - 10)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_vwap': 
-        sym_state['trend_vwap_period'] = min(500, sym_state['trend_vwap_period'] + 10)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_ema': 
-        sym_state['trend_ema_period'] = max(10, sym_state['trend_ema_period'] - 10)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_ema': 
-        sym_state['trend_ema_period'] = min(500, sym_state['trend_ema_period'] + 10)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_filter_help':
-        help_txt = ("<b>⚙️ دليل تخصيص القيم:</b>\n\n"
-                    "أرسل أمراً مباشراً في الدردشة لتغيير أي قيمة بالصيغة التالية:\n\n"
-                    "<b>تغيير فلاتر الترند الشامل:</b>\n"
-                    "<code>/set ema 50</code>\n"
-                    "<code>/set vwap 100</code>\n\n"
-                    "<b>تخصيص الأهداف والوقف لكل فريم:</b>\n"
-                    "<code>/set 5m tp 40</code>\n"
-                    "<code>/set 15m sl 25</code>\n\n"
-                    "سيتم حفظ القيمة وتطبيقها فوراً.")
-        await _show(chat_id, msg_id, help_txt, get_gann_keyboard())
-    elif d == 'gann_dec_margin': 
-        sym_state['gann_touch_margin_pts'] = max(1, sym_state['gann_touch_margin_pts'] - 1)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_margin': 
-        sym_state['gann_touch_margin_pts'] = min(50, sym_state['gann_touch_margin_pts'] + 1)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_lot':
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_dec_be_pts':
+        sym_state['strategy_be_trigger_points'] = max(10, sym_state.get('strategy_be_trigger_points', 40) - 10)
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_inc_be_pts':
+        sym_state['strategy_be_trigger_points'] = min(200, sym_state.get('strategy_be_trigger_points', 40) + 10)
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_dec_lot':
         sym_state['lot_size'] = round(max(0.01, sym_state['lot_size'] - 0.01), 2)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_lot':
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_inc_lot':
         sym_state['lot_size'] = round(min(50.0, sym_state['lot_size'] + 0.01), 2)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_hours': 
-        sym_state['gann_cycle_hours'] = max(1, sym_state['gann_cycle_hours'] - 1)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_hours': 
-        sym_state['gann_cycle_hours'] = min(24, sym_state['gann_cycle_hours'] + 1)
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_toggle_tpsl':
-        sym_state['gann_tpsl_mode'] = 'atr' if sym_state['gann_tpsl_mode'] == 'fixed' else 'fixed'
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_tp10': sym_state['gann_tp_points'] = max(10, sym_state['gann_tp_points'] - 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_tp10': sym_state['gann_tp_points'] = min(1000, sym_state['gann_tp_points'] + 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_sl10': sym_state['gann_sl_points'] = max(10, sym_state['gann_sl_points'] - 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_sl10': sym_state['gann_sl_points'] = min(1000, sym_state['gann_sl_points'] + 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_atrp':  sym_state['gann_atr_period'] = max(5,   sym_state['gann_atr_period'] - 1); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_atrp':  sym_state['gann_atr_period'] = min(50,  sym_state['gann_atr_period'] + 1); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_atrsl': sym_state['gann_atr_sl_mult'] = max(0.5, round(sym_state['gann_atr_sl_mult'] - 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_atrsl': sym_state['gann_atr_sl_mult'] = min(5.0, round(sym_state['gann_atr_sl_mult'] + 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_atrtp': sym_state['gann_atr_tp_mult'] = max(0.5, round(sym_state['gann_atr_tp_mult'] - 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_atrtp': sym_state['gann_atr_tp_mult'] = min(8.0, round(sym_state['gann_atr_tp_mult'] + 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d.startswith('gann_toggle_pair_'):
-        pair = d[len('gann_toggle_pair_'):]
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_toggle_tpsl':
+        sym_state['strategy_tpsl_mode'] = 'atr' if sym_state['strategy_tpsl_mode'] == 'fixed' else 'fixed'
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_dec_tp10': sym_state['strategy_tp_points'] = max(10, sym_state['strategy_tp_points'] - 10); await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_inc_tp10': sym_state['strategy_tp_points'] = min(1000, sym_state['strategy_tp_points'] + 10); await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_dec_sl10': sym_state['strategy_sl_points'] = max(10, sym_state['strategy_sl_points'] - 10); await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_inc_sl10': sym_state['strategy_sl_points'] = min(1000, sym_state['strategy_sl_points'] + 10); await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_dec_atrp':  sym_state['strategy_atr_period'] = max(5,   sym_state['strategy_atr_period'] - 1); await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_inc_atrp':  sym_state['strategy_atr_period'] = min(50,  sym_state['strategy_atr_period'] + 1); await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_dec_atrsl': sym_state['strategy_atr_sl_mult'] = max(0.5, round(sym_state['strategy_atr_sl_mult'] - 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_inc_atrsl': sym_state['strategy_atr_sl_mult'] = min(5.0, round(sym_state['strategy_atr_sl_mult'] + 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_dec_atrtp': sym_state['strategy_atr_tp_mult'] = max(0.5, round(sym_state['strategy_atr_tp_mult'] - 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_inc_atrtp': sym_state['strategy_atr_tp_mult'] = min(8.0, round(sym_state['strategy_atr_tp_mult'] + 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d.startswith('strategy_toggle_pair_'):
+        pair = d[len('strategy_toggle_pair_'):]
         bot_state['active_symbols'][pair] = not bot_state['active_symbols'][pair]
         # Price feed is now driven by oanda_live_price_poller, which reads
         # active_symbols dynamically on every poll -- no MetaAPI market-data
         # subscription is required when a symbol is toggled on.
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d.startswith('gann_sel_pair_'):
-        pair = d[len('gann_sel_pair_'):]
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d.startswith('strategy_sel_pair_'):
+        pair = d[len('strategy_sel_pair_'):]
         bot_state['ui_selected_symbol'] = pair
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d.startswith('gann_tf_'):
-        tfk = d[len('gann_tf_'):]
-        if tfk in sym_state['gann_monitor_tfs']: sym_state['gann_monitor_tfs'][tfk] = not sym_state['gann_monitor_tfs'][tfk]
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_tpsl_tf': await _show(chat_id, msg_id, '⚙️ TP/SL مخصص لكل فريم:', get_gann_tpsl_tf_keyboard())
-    elif d.startswith('gann_tptf_sel_'):
-        sel_tf = d[len('gann_tptf_sel_'):]; await _show(chat_id, msg_id, f'⚙️ TP/SL [{sel_tf}]:', get_gann_tpsl_tf_keyboard(sel_tf))
-    elif d.startswith('gann_tptf_itp_'):
-        tf = d[len('gann_tptf_itp_'):]; sym_state['gann_tp_per_tf'][tf] = sym_state['gann_tp_per_tf'].get(tf, 0) + 10; await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
-    elif d.startswith('gann_tptf_dtp_'):
-        tf = d[len('gann_tptf_dtp_'):]; sym_state['gann_tp_per_tf'][tf] = max(0, sym_state['gann_tp_per_tf'].get(tf, 0) - 10); await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
-    elif d.startswith('gann_tptf_isl_'):
-        tf = d[len('gann_tptf_isl_'):]; sym_state['gann_sl_per_tf'][tf] = sym_state['gann_sl_per_tf'].get(tf, 0) + 10; await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
-    elif d.startswith('gann_tptf_dsl_'):
-        tf = d[len('gann_tptf_dsl_'):]; sym_state['gann_sl_per_tf'][tf] = max(0, sym_state['gann_sl_per_tf'].get(tf, 0) - 10); await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
-    elif d.startswith('gann_tptf_rst_'):
-        tf = d[len('gann_tptf_rst_'):]; sym_state['gann_tp_per_tf'][tf] = 0; sym_state['gann_sl_per_tf'][tf] = 0; await _show(chat_id, msg_id, f'⚙️ تمت إعادة الضبط:', get_gann_tpsl_tf_keyboard(tf))
-    elif d == 'menu_gann_bt':
-        await _show(chat_id, msg_id, 'اختر مدة الباكتيست:', get_gann_bt_keyboard())
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d.startswith('strategy_tf_'):
+        tfk = d[len('strategy_tf_'):]
+        if tfk in sym_state['strategy_monitor_tfs']: sym_state['strategy_monitor_tfs'][tfk] = not sym_state['strategy_monitor_tfs'][tfk]
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
+    elif d == 'strategy_tpsl_tf': await _show(chat_id, msg_id, '⚙️ TP/SL مخصص لكل فريم:', get_strategy_tpsl_tf_keyboard())
+    elif d.startswith('strategy_tptf_sel_'):
+        sel_tf = d[len('strategy_tptf_sel_'):]; await _show(chat_id, msg_id, f'⚙️ TP/SL [{sel_tf}]:', get_strategy_tpsl_tf_keyboard(sel_tf))
+    elif d.startswith('strategy_tptf_itp_'):
+        tf = d[len('strategy_tptf_itp_'):]; sym_state['strategy_tp_per_tf'][tf] = sym_state['strategy_tp_per_tf'].get(tf, 0) + 10; await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_strategy_tpsl_tf_keyboard(tf))
+    elif d.startswith('strategy_tptf_dtp_'):
+        tf = d[len('strategy_tptf_dtp_'):]; sym_state['strategy_tp_per_tf'][tf] = max(0, sym_state['strategy_tp_per_tf'].get(tf, 0) - 10); await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_strategy_tpsl_tf_keyboard(tf))
+    elif d.startswith('strategy_tptf_isl_'):
+        tf = d[len('strategy_tptf_isl_'):]; sym_state['strategy_sl_per_tf'][tf] = sym_state['strategy_sl_per_tf'].get(tf, 0) + 10; await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_strategy_tpsl_tf_keyboard(tf))
+    elif d.startswith('strategy_tptf_dsl_'):
+        tf = d[len('strategy_tptf_dsl_'):]; sym_state['strategy_sl_per_tf'][tf] = max(0, sym_state['strategy_sl_per_tf'].get(tf, 0) - 10); await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_strategy_tpsl_tf_keyboard(tf))
+    elif d.startswith('strategy_tptf_rst_'):
+        tf = d[len('strategy_tptf_rst_'):]; sym_state['strategy_tp_per_tf'][tf] = 0; sym_state['strategy_sl_per_tf'][tf] = 0; await _show(chat_id, msg_id, f'⚙️ تمت إعادة الضبط:', get_strategy_tpsl_tf_keyboard(tf))
+    elif d == 'menu_strategy_bt':
+        await _show(chat_id, msg_id, 'اختر مدة الباكتيست:', get_strategy_bt_keyboard())
     elif d.startswith('gbt_'):
         days = int(d.split('_')[1])
         end_dt = datetime.now(timezone.utc)
         start_dt = end_dt - timedelta(days=days)
         if not bot_state['is_backtesting']:
             bot_state['is_backtesting'] = True
-            _safe_task(run_gann_backtest(start_dt, end_dt), 'backtest_preset')
-        await _show(chat_id, msg_id, f'⏳ باكتيست يعمل...', get_gann_bt_keyboard())
+            _safe_task(run_strategy_backtest(start_dt, end_dt), 'backtest_preset')
+        await _show(chat_id, msg_id, f'⏳ باكتيست يعمل...', get_strategy_bt_keyboard())
     elif d == 'cancel_bt':
         global _bt_progress
         if _bt_progress and bot_state['is_backtesting']: await _bt_progress.cancel()
         bot_state['is_backtesting'] = False
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+        await _show(chat_id, msg_id, 'إعدادات الاستراتيجية:', get_strategy_keyboard())
     elif d == 'menu_lt':
         await _show(chat_id, msg_id, '🧪 Live-Twin Simulator:', get_live_twin_keyboard())
     elif d == 'menu_lt_friction':
@@ -5403,23 +4460,16 @@ async def process_tg_update(update: dict) -> None:
         parts = msg.lower().split()
         if parts[0] == '/set':
             sym_state = bot_state['symbol_state'][bot_state['ui_selected_symbol']]
-            if len(parts) == 3 and parts[1] in ['ema', 'vwap'] and parts[2].isdigit():
-                val = int(parts[2])
-                if parts[1] == 'ema': sym_state['trend_ema_period'] = val
-                elif parts[1] == 'vwap': sym_state['trend_vwap_period'] = val
-                await save_bot_persistence()
-                await send_tg_msg(f"✅ <b>تم التحديث بنجاح!</b>\n⚙️ {parts[1].upper()} الشامل: {val}")
-                return
-            elif len(parts) == 4:
+            if len(parts) == 4:
                 _, tf, param, val = parts
                 if tf in _TFS and param in ['tp', 'sl'] and val.isdigit():
                     val = int(val)
-                    if param == 'tp': sym_state['gann_tp_per_tf'][tf] = val
-                    elif param == 'sl': sym_state['gann_sl_per_tf'][tf] = val
+                    if param == 'tp': sym_state['strategy_tp_per_tf'][tf] = val
+                    elif param == 'sl': sym_state['strategy_sl_per_tf'][tf] = val
                     await save_bot_persistence()
                     await send_tg_msg(f"✅ <b>تم التحديث بنجاح!</b>\n📌 الفريم: {tf}\n⚙️ {param.upper()}: {val}")
                     return
-            await send_tg_msg("❌ <b>صيغة خاطئة!</b>\n<b>أمثلة صحيحة:</b>\n<code>/set ema 50</code>\n<code>/set vwap 100</code>\n<code>/set 5m tp 40</code>\n<code>/set 15m sl 25</code>")
+            await send_tg_msg("❌ <b>صيغة خاطئة!</b>\n<b>أمثلة صحيحة:</b>\n<code>/set 5m tp 40</code>\n<code>/set 15m sl 25</code>")
             return
 
         if parts[0] == '/backtest':
@@ -5433,7 +4483,7 @@ async def process_tg_update(update: dict) -> None:
                     dt = (dam_midnight - DAM_OFF).replace(tzinfo=timezone.utc)
                     if not bot_state['is_backtesting']:
                         bot_state['is_backtesting'] = True
-                        _safe_task(run_gann_backtest(dt, dt + timedelta(days=1)), 'backtest_cmd')
+                        _safe_task(run_strategy_backtest(dt, dt + timedelta(days=1)), 'backtest_cmd')
                     await send_tg_msg(f"⏳ جاري باكتيست ليوم {parts[1]} (بتوقيت دمشق)...")
                     return
                 elif len(parts) == 3:
@@ -5443,7 +4493,7 @@ async def process_tg_update(update: dict) -> None:
                     dt2 = (dam_midnight2 - DAM_OFF).replace(tzinfo=timezone.utc)
                     if not bot_state['is_backtesting']:
                         bot_state['is_backtesting'] = True
-                        _safe_task(run_gann_backtest(dt1, dt2), 'backtest_range_cmd')
+                        _safe_task(run_strategy_backtest(dt1, dt2), 'backtest_range_cmd')
                     await send_tg_msg(f"⏳ جاري باكتيست من {parts[1]} إلى {parts[2]} (بتوقيت دمشق)...")
                     return
             except Exception:
@@ -5542,7 +4592,21 @@ async def supervised(coro_fn, *args, label: str = '') -> None:
             task = asyncio.current_task()
             if label == 'tg_polling': _poll_task = task
             await coro_fn(*args)
-        except asyncio.CancelledError: await asyncio.sleep(2)   
+        except asyncio.CancelledError:
+            # NOTE: in this codebase the only thing that ever calls
+            # .cancel() on a supervised task is telegram_watchdog, as a
+            # deliberate self-heal restart when getUpdates has stalled
+            # (e.g. "packet queue is empty, aborting" from a wedged
+            # aiohttp connection). There is no separate graceful-shutdown
+            # path that cancels individual tasks -- the process just gets
+            # killed outright on redeploy. So CancelledError here always
+            # means "restart me", never "stop for good". Re-raising it
+            # (as a previous version of this function did) exits the
+            # supervisor loop permanently and kills polling/buttons until
+            # the whole process is manually restarted -- that was the bug
+            # that caused "no button works". Swallow it and loop back.
+            logger.warning('supervised task "%s" was cancelled (self-heal) -- restarting', label)
+            await asyncio.sleep(2)
         except Exception as e:
             log_exception(f'supervised task "{label}"', e)
             await asyncio.sleep(5)
@@ -5569,8 +4633,7 @@ async def main() -> None:
     tasks = [
         asyncio.create_task(supervised(telegram_polling_loop, label='tg_polling')),
         asyncio.create_task(supervised(telegram_watchdog,     label='tg_watchdog')),
-        asyncio.create_task(supervised(gann_monitor_scanner,  label='gann_monitor')),
-        asyncio.create_task(supervised(gann_cycle_manager,    label='gann_cycle')),
+        asyncio.create_task(supervised(strategy_monitor_scanner,  label='strategy_monitor')),
         asyncio.create_task(supervised(global_ledger_reconciliation, label='global_reconciliation')),
         asyncio.create_task(supervised(oanda_live_price_poller, label='oanda_price_poller')),
     ]

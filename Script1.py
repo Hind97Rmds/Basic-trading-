@@ -200,6 +200,7 @@ async def oanda_live_price_poller() -> None:
     MetaAPI is still used purely for order execution / reconciliation;
     only the price feed has moved to OANDA REST polling.
     """
+    global _last_any_tick_ts
     headers = {'Authorization': f'Bearer {OANDA_TOKEN}', 'Content-Type': 'application/json'}
     poll_interval = 1.5  # seconds (within the requested 1-2s window)
     while True:
@@ -224,6 +225,7 @@ async def oanda_live_price_poller() -> None:
                     data = await resp.json()
 
             now_mono = time.monotonic()
+            _last_any_tick_ts = now_mono  # feed-health heartbeat for the staleness watchdog
             for price in data.get('prices', []):
                 sym = price.get('instrument')
                 if sym not in bot_state['active_symbols'] or not bot_state['active_symbols'][sym]:
@@ -2802,24 +2804,33 @@ async def gann_monitor_scanner() -> None:
             if _metaapi_conn is None or _metaapi_account is None:
                 await _bootstrap_metaapi_connection()
 
-            # ── WS tick-silence watchdog (runs BEFORE and INDEPENDENTLY of the
-            # connection_status check below) ──
-            # This is the fix for the 6-hour rollover freeze: connection_status
-            # can keep reporting CONNECTED while the WS session is actually a
-            # zombie (no more ticks, no on_disconnected fired). The only thing
-            # that can't lie here is "how long since the last real tick
-            # arrived" -- _last_any_tick_ts, stamped directly in the price
-            # listener. >60s of silence during market hours forces a full
-            # connection teardown+rebuild, not just a symbol re-subscribe.
+            # ── Feed-level staleness watchdog (OANDA REST poller) ──
+            # The live price feed is now driven by oanda_live_price_poller.
+            # If every active symbol's cached quote goes stale (the poller
+            # is failing / network down), escalate to READ_ONLY so we don't
+            # trade on a dead feed. We do NOT tear down the MetaAPI execution
+            # connection here -- that is handled by the exec-channel watchdog
+            # below, and only when the connection itself is non-RUNNING.
             active_syms_now = [s for s, on in bot_state['active_symbols'].items() if on]
-            if (_metaapi_conn is not None and active_syms_now and _is_market_hours_now()
-                    and (time.monotonic() - _last_any_tick_ts) > _WS_WATCHDOG_STALE_SECONDS):
-                await _force_full_reconnect(
-                    f"لا تيك واحد وصل منذ {time.monotonic() - _last_any_tick_ts:.0f}s "
-                    f"(الحد: {_WS_WATCHDOG_STALE_SECONDS:.0f}s)"
-                )
+            if active_syms_now:
+                all_stale = all(_lq_is_stale(s) for s in active_syms_now)
+                if all_stale and bot_state.get('connection_state') == CONN_RUNNING:
+                    # Only escalate if the price feed has been dead for the
+                    # WS watchdog window (reuse the same stale threshold).
+                    if (_last_any_tick_ts is not None
+                            and (time.monotonic() - _last_any_tick_ts) > _WS_WATCHDOG_STALE_SECONDS):
+                        await set_connection_state(
+                            CONN_READ_ONLY,
+                            f"Live price feed stale >{_WS_WATCHDOG_STALE_SECONDS:.0f}s (OANDA REST poller). "
+                            f"Trading paused until quotes resume."
+                        )
+                elif not all_stale and bot_state.get('connection_state') == CONN_READ_ONLY:
+                    # Feed recovered -- but only auto-promote if the MetaAPI
+                    # execution channel is also healthy.
+                    if _metaapi_conn is not None:
+                        await set_connection_state(CONN_RUNNING, "Live price feed resumed.")
 
-            # MT5 Zombie Singleton Heartbeat
+            # MT5 Zombie Singleton Heartbeat (execution channel only)
             if _metaapi_account and bot_state.get('connection_state') != CONN_RUNNING:
                 await set_connection_state(CONN_READ_ONLY, "MetaAPI connection lost — attempting reconnect.")
                 reconnected = False
@@ -2837,7 +2848,7 @@ async def gann_monitor_scanner() -> None:
                         # (re)builds _metaapi_conn from scratch either way.
                         reconnected = await _bootstrap_metaapi_connection()
                         if reconnected:
-                            c_log("MetaAPI Reconnected successfully (live quotes resubscribed).")
+                            c_log("MetaAPI Reconnected successfully (execution channel).")
                             break
                     except Exception as e:
                         log_exception(f"MetaAPI reconnect attempt {attempt+1}/5", e)
@@ -2848,17 +2859,6 @@ async def gann_monitor_scanner() -> None:
                     # If this persists, an operator will see the escalation
                     # message and the repeated READ_ONLY state in logs.
                     c_log("MetaAPI reconnect exhausted 5 attempts this tick; will retry next cycle.")
-
-            # Feed-level staleness watchdog: connection_status can still say
-            # CONNECTED while a symbol's subscription silently dropped (no
-            # more ticks arriving). This is caught independently of the
-            # connection-level check above, and just re-subscribes rather
-            # than tearing down the whole connection.
-            elif _metaapi_conn is not None:
-                for sym, on in bot_state['active_symbols'].items():
-                    if on and _lq_is_stale(sym):
-                        c_log(f"Live quote feed stale for {sym} -- resubscribing.")
-                        await _lq_subscribe_symbol(sym)
 
             now_dt = datetime.now(timezone.utc)
 
@@ -5320,8 +5320,9 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     elif d.startswith('gann_toggle_pair_'):
         pair = d[len('gann_toggle_pair_'):]
         bot_state['active_symbols'][pair] = not bot_state['active_symbols'][pair]
-        if bot_state['active_symbols'][pair]:
-            await _lq_subscribe_symbol(pair)
+        # Price feed is now driven by oanda_live_price_poller, which reads
+        # active_symbols dynamically on every poll -- no MetaAPI market-data
+        # subscription is required when a symbol is toggled on.
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d.startswith('gann_sel_pair_'):
         pair = d[len('gann_sel_pair_'):]
@@ -5571,6 +5572,7 @@ async def main() -> None:
         asyncio.create_task(supervised(gann_monitor_scanner,  label='gann_monitor')),
         asyncio.create_task(supervised(gann_cycle_manager,    label='gann_cycle')),
         asyncio.create_task(supervised(global_ledger_reconciliation, label='global_reconciliation')),
+        asyncio.create_task(supervised(oanda_live_price_poller, label='oanda_price_poller')),
     ]
     
     c_log('Gold Scalper Bot v9.4 (Resilience-First Core) started successfully.')
